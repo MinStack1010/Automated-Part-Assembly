@@ -1,0 +1,29 @@
+# Git / editor
+.git
+.gitignore
+.gitmodules
+.vscode
+.DS_Store
+
+# Python cache
+**/__pycache__
+**/*.py[cod]
+*.egg-info
+**/*.egg-info
+
+# Build artifacts của host (macOS/Windows) - không được copy vào image
+simulation/build
+simulation/dist
+build
+dist
+
+# Keep bundled sample assemblies so the default API can serve and plan them.
+# Large external datasets can still be mounted with ASSEMBLY_ASSETS_DIR.
+images
+
+# File Docker
+Dockerfile
+docker-compose.yml
+.dockerignore
+.env
+.api-data

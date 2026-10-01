@@ -21,6 +21,7 @@ private:
     VectorX str_to_eigen(std::string str);
     VectorXi str_to_eigen_int(std::string str);
     std::vector<Vector3> parse_contact_points(std::string str);
+    std::string resolve_asset_path(const std::string &path) const;
 
     // compute M and f matrices
     void computeMatrices(MatrixX& M, VectorX& f); // evaluate force and mass matrix

@@ -13,10 +13,18 @@ from time import time
 import random
 from scipy.spatial.transform import Rotation
 
-from pyplanners.rrt_connect import rrt_connect, birrt
-from pyplanners.rrt import rrt
-from pyplanners.targetless_rrt import targetless_rrt
-from pyplanners.smoothing import smooth_path
+try:
+    # The API imports this script as baselines.run_joint_plan. The fallback
+    # retains the original direct-script execution behavior.
+    from baselines.pyplanners.rrt_connect import rrt_connect, birrt
+    from baselines.pyplanners.rrt import rrt
+    from baselines.pyplanners.targetless_rrt import targetless_rrt
+    from baselines.pyplanners.smoothing import smooth_path
+except ModuleNotFoundError:
+    from pyplanners.rrt_connect import rrt_connect, birrt
+    from pyplanners.rrt import rrt
+    from pyplanners.targetless_rrt import targetless_rrt
+    from pyplanners.smoothing import smooth_path
 
 from assets.load import load_assembly, load_part_ids
 from assets.save import interpolate_path, save_path

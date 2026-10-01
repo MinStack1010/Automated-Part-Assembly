@@ -69,13 +69,23 @@ VectorXi Simulation::str_to_eigen_int(std::string str) {
     return vec;
 }
 
+// Resolve a mesh path against _asset_folder: absolute paths are used as-is,
+// relative paths are only prefixed when they are not already rooted at _asset_folder.
+std::string Simulation::resolve_asset_path(const std::string &path) const {
+    if (!path.empty() && path[0] == '/') // absolute path (e.g. API upload directory)
+        return path;
+    if (path.find(_asset_folder) != std::string::npos)
+        return path;
+    return _asset_folder + "//" + path;
+}
+
 std::vector<Vector3> Simulation::parse_contact_points(std::string str) {
     std::vector<Vector3> contacts; 
     contacts.clear();
-    std::string filename = str;
-    if (filename.find(_asset_folder) == std::string::npos) // relative path
-        filename = _asset_folder + "//" + filename;
+    std::string filename = resolve_asset_path(str);
     FILE* fp = fopen(filename.c_str(), "r");
+    if (fp == nullptr)
+        throw_error("contact point file not found: " + filename);
     int n;
     int res = fscanf(fp, "%d", &n);
     for (int i = 0;i < n;i++) {
@@ -555,9 +565,7 @@ Joint* Simulation::parse_from_xml_file(pugi::xml_node root, pugi::xml_node node,
                 if (body_node.attribute("adaptive_sample")) {
                     adaptive_sample = body_node.attribute("adaptive_sample").as_bool();
                 }
-                std::string filename = body_node.attribute("filename").value();
-                if (filename.find(_asset_folder) == std::string::npos) // relative path
-                    filename = _asset_folder + "//" + filename;
+                std::string filename = resolve_asset_path(body_node.attribute("filename").value());
                 if (type == "mesh") {
                     body = new BodyMeshObj(this, joint, filename, R, pos, transform_type, density, scale, adaptive_sample);
                 } else if (type == "SDF" || type == "BVH") {
@@ -586,7 +594,7 @@ Joint* Simulation::parse_from_xml_file(pugi::xml_node root, pugi::xml_node node,
                     } else if (type == "BVH") {
                         std::string filename_BVH_mesh = filename;
                         if (body_node.attribute("BVH_mesh_filename")) {
-                            filename_BVH_mesh = body_node.attribute("BVH_mesh_filename").value();
+                            filename_BVH_mesh = resolve_asset_path(body_node.attribute("BVH_mesh_filename").value());
                         }
                         body = new BodyBVHObj(this, joint, filename, filename_BVH_mesh, R, pos, dx, res, col_th, transform_type, density, scale, adaptive_sample, load_sdf, save_sdf);
                     }
@@ -601,13 +609,9 @@ Joint* Simulation::parse_from_xml_file(pugi::xml_node root, pugi::xml_node node,
                 Vector3 visual_frame_pos = Vector3::Zero();
                 Vector4 visual_frame_quat = Vector4(1, 0, 0, 0);
                 if (body_node.attribute("mesh")) {
-                    visual_mesh_filename = body_node.attribute("mesh").value();
-                    if (visual_mesh_filename.find(_asset_folder) == std::string::npos) // relative path
-                        visual_mesh_filename = _asset_folder + "//" + visual_mesh_filename;
+                    visual_mesh_filename = resolve_asset_path(body_node.attribute("mesh").value());
                 } else if (body_node.child("visual") && body_node.child("visual").attribute("mesh")) {
-                    visual_mesh_filename = body_node.child("visual").attribute("mesh").value();
-                    if (visual_mesh_filename.find(_asset_folder) == std::string::npos) // relative path
-                        visual_mesh_filename = _asset_folder + "//" + visual_mesh_filename;
+                    visual_mesh_filename = resolve_asset_path(body_node.child("visual").attribute("mesh").value());
                     if (body_node.child("visual").attribute("pos")) {
                         visual_frame_pos = str_to_eigen(body_node.child("visual").attribute("pos").value());
                     }

@@ -1,0 +1,78 @@
+
+x-common: &common
+  working_dir: /app
+  ipc: host
+  stdin_open: true
+  tty: true
+  environment: &default-env
+    LIBGL_ALWAYS_SOFTWARE: "1"
+    MPLBACKEND: Agg
+  volumes: &default-volumes
+    - .:/app
+    - ${JOINT_ASSEMBLY_DIR:-${HOME}/Downloads/joint_assembly}:/Users/ploggvn/Downloads/joint_assembly
+
+services:
+  api:
+    build:
+      context: .
+      target: runtime
+    image: assemble-them-all:latest
+    # Native code (redmax_py) có thể segfault trong process uvicorn -> container
+    # thoát 139. Tự khởi động lại thay vì để API chết hẳn.
+    restart: unless-stopped
+    ports:
+      - "${API_PORT:-8000}:8000"
+    environment:
+      API_HOST: "0.0.0.0"
+      API_PORT: "8000"
+      API_STORAGE_DIR: "/var/lib/assemble-them-all"
+      ASSEMBLY_ASSETS_DIR: "/app/assets"
+      API_MAX_WORKERS: "${API_MAX_WORKERS:-1}"
+      LOG_LEVEL: "${LOG_LEVEL:-INFO}"
+      CORS_ORIGINS: "${CORS_ORIGINS:-}"
+      LIBGL_ALWAYS_SOFTWARE: "1"
+      MPLBACKEND: Agg
+    volumes:
+      - api-data:/var/lib/assemble-them-all
+
+  app:
+    build:
+      context: .
+      target: runtime
+    image: assemble-them-all:latest
+    <<: *common
+    command: sleep infinity
+
+  # Ghép X server thật của host để thấy cửa sổ viewer trực tiếp.
+  # - Linux: DISPLAY=:0 (mặc định), cần `xhost +local:` trước khi chạy.
+  # - macOS: cài XQuartz rồi chạy
+  #     xhost +localhost
+  #     DISPLAY=host.docker.internal:0 docker compose --profile gui run --rm gui python examples/test_joint_sim.py --id 00000
+  gui:
+    build:
+      context: .
+      target: runtime
+    image: assemble-them-all:latest
+    profiles: ["gui"]
+    <<: *common
+    environment:
+      DISPLAY: "${DISPLAY:-:0}"
+      XVFB_AUTOSTART: "0"
+      LIBGL_ALWAYS_SOFTWARE: "1"
+      MPLBACKEND: Agg
+    volumes:
+      - .:/app
+      - ${JOINT_ASSEMBLY_DIR:-${HOME}/Downloads/joint_assembly}:/Users/ploggvn/Downloads/joint_assembly
+      - /tmp/.X11-unix:/tmp/.X11-unix
+    command: sleep infinity
+
+  dev:
+    build:
+      context: .
+      target: builder
+    image: assemble-them-all:dev
+    <<: *common
+    command: sleep infinity
+
+volumes:
+  api-data:
