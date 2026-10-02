@@ -171,7 +171,13 @@ class MultiPlanRequest(BaseModel):
     sequence_max_time: float = Field(default=3600, gt=0, le=86400)
     path_max_time: float = Field(default=120, gt=0, le=86400)
     seed: int = 1
-    save_artifacts: bool = False
+    save_artifacts: bool = Field(
+        default=False,
+        description=(
+            "Store the moving parts' trajectory as path/<frame>.npy job artifacts; "
+            "each frame is a 4x4 transform of the part moving during that segment."
+        ),
+    )
     n_save_states: int = Field(default=100, ge=1, le=100000)
     # Physics planner options
     collision_threshold: float = Field(default=0.01, ge=0)

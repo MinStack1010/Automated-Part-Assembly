@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import shutil
 from pathlib import Path
 from typing import Any, Optional
 
@@ -50,6 +51,68 @@ def _serialize_path(path: Any, artifact_dir: Optional[Path], n_save_states: int)
         save_path(str(path_dir), path, n_frame=n_save_states)
         result["artifact_directory"] = "path"
     return result
+
+
+def _consolidate_motion_artifacts(output_dir: Path) -> dict[str, Any]:
+    """Merge the per-attempt motion folders written by the sequence planners into ``path/``.
+
+    The multi-plan engine saves ``{assembly_id}/{attempt}_{move_id}/{frame}.npy`` for every
+    successful attempt, which mixes the moving part of each step with the attempt numbering.
+    Clients animate a single continuous trajectory, so the frames are renumbered into one
+    ``path/{frame}.npy`` sequence ordered by attempt, and the per-attempt folders are dropped
+    from the artifact listing.
+    """
+    path_dir = output_dir / "path"
+    steps: list[tuple[int, str, Path]] = []
+    if output_dir.is_dir():
+        for step in output_dir.rglob("*"):
+            if not step.is_dir() or step == path_dir or path_dir in step.parents:
+                continue
+            attempt_text, separator, move_id = step.name.partition("_")
+            if not separator or not attempt_text.isdigit() or not move_id:
+                continue
+            if any(frame.is_file() and frame.stem.isdigit() for frame in step.glob("*.npy")):
+                steps.append((int(attempt_text), move_id, step))
+    if not steps:
+        return {}
+    steps.sort(key=lambda step: step[0])
+
+    path_dir.mkdir(parents=True, exist_ok=True)
+    frame_index = 0
+    path_parts: list[dict[str, Any]] = []
+    step_parents: set[Path] = set()
+    for attempt, move_id, step in steps:
+        frames = sorted(
+            (frame for frame in step.glob("*.npy") if frame.stem.isdigit()),
+            key=lambda frame: int(frame.stem),
+        )
+        frame_start = frame_index
+        for frame in frames:
+            shutil.copyfile(frame, path_dir / f"{frame_index}.npy")
+            frame_index += 1
+        path_parts.append(
+            {
+                "part_id": move_id,
+                "attempt": attempt,
+                "frame_start": frame_start,
+                "frame_end": frame_index - 1,
+            }
+        )
+        step_parents.add(step.parent)
+
+    for parent in step_parents:
+        if parent == output_dir:
+            for _, _, step in steps:
+                if step.parent == output_dir:
+                    shutil.rmtree(step, ignore_errors=True)
+        else:
+            shutil.rmtree(parent, ignore_errors=True)
+
+    return {
+        "artifact_directory": "path",
+        "path_state_count": frame_index,
+        "path_parts": path_parts,
+    }
 
 
 def run_joint_plan(request: JointPlanRequest, artifact_dir: Optional[str] = None) -> dict[str, Any]:
@@ -159,6 +222,17 @@ def run_multi_plan(request: MultiPlanRequest, artifact_dir: Optional[str] = None
         finally:
             clear_saved_sdfs(str(assembly_dir))
 
+    motion: dict[str, Any] = {}
+    if output_dir is not None:
+        motion = _consolidate_motion_artifacts(Path(output_dir))
+        if motion:
+            logger.info(
+                "MULTI-PLAN ARTIFACTS dir=%s frames=%s parts=%s",
+                motion["artifact_directory"],
+                motion["path_state_count"],
+                [(part["part_id"], part["frame_start"], part["frame_end"]) for part in motion["path_parts"]],
+            )
+
     return {
         "engine": request.engine,
         "sequence_planner": request.sequence_planner,
@@ -168,4 +242,5 @@ def run_multi_plan(request: MultiPlanRequest, artifact_dir: Optional[str] = None
         "sequence": list(sequence),
         "attempts": int(attempts),
         "elapsed_seconds": float(elapsed_seconds),
+        **motion,
     }

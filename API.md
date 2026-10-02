@@ -149,9 +149,30 @@ and `simplify`.
 | `geometric` | `baselines/run_multi_plan.py` | `random`, `queue` | `rrt`, `rrt-connect`, `birrt`, `trrt`, `matevec-trrt` |
 
 The result contains the existing sequence planner's status, order of removed
-parts, number of attempts, and total elapsed time. Set `save_artifacts=true`
-to preserve successful path transforms created by the original `save_path`
-helper.
+parts, number of attempts, and total elapsed time.
+
+Set `save_artifacts=true` and the moving parts' trajectories are exported as a
+single flat animation sequence. The original engine writes one folder per
+successful attempt (`{assembly_id}/{attempt}_{move_id}/{frame}.npy`); the API
+merges those folders into `path/` in sequence order, renumbers the frames, and
+removes the per-attempt folders so the job's `artifacts` array only lists
+animation frames:
+
+```json
+"artifacts": ["path/0.npy", "path/1.npy", "path/2.npy"]
+```
+
+Each `.npy` file is a 4x4 homogeneous transform of the part that moves during
+that segment. The result reports `artifact_directory` (`"path"`),
+`path_state_count`, and `path_parts`, which maps every segment back to its
+`part_id`, source `attempt`, and inclusive `frame_start`/`frame_end` range:
+
+```json
+"path_parts": [
+  {"part_id": "1", "attempt": 0, "frame_start": 0, "frame_end": 41},
+  {"part_id": "0", "attempt": 2, "frame_start": 42, "frame_end": 88}
+]
+```
 
 ## Intentionally not exposed as raw endpoints
 
