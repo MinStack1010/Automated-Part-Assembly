@@ -2,12 +2,18 @@
 
 from __future__ import annotations
 
-from fastapi import APIRouter
-from fastapi.responses import FileResponse
+import logging
 
-from api.schemas import JobAccepted, JobResponse, JobResultResponse, JointPlanRequest, MultiPlanRequest
+from fastapi import APIRouter
+from fastapi.responses import Response
+
+from api.errors import ApiError
+from api.schemas import AssemblyRef, JobAccepted, JobResponse, JobResultResponse, JointPlanRequest, MultiPlanRequest
+from api.services.artifacts import build_artifact_zip
+from api.services.assemblies import resolve_assembly
 from api.services.jobs import job_manager
 
+logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/v1/jobs", tags=["jobs"])
 
 
@@ -33,10 +39,33 @@ def get_job_result(job_id: str) -> JobResultResponse:
     return JobResultResponse(result=job_manager.result(job_id))
 
 
-@router.get("/{job_id}/artifacts/{artifact_path:path}", summary="Download a saved job artifact")
-def get_artifact(job_id: str, artifact_path: str) -> FileResponse:
-    artifact = job_manager.resolve_artifact(job_id, artifact_path)
-    return FileResponse(artifact, filename=artifact.name)
+@router.get(
+    "/{job_id}/artifacts.zip",
+    summary="Download every job artifact as one zip",
+    description=(
+        "Returns artifact.zip containing artifact/npy (path.json frames converted to "
+        "matrices), artifact/json (the original files), and artifact/gif (rendered from "
+        "path.json on first download, cached afterwards). Empty folders are included "
+        "when a group has no files."
+    ),
+    responses={200: {"content": {"application/zip": {}}}},
+    response_class=Response,
+)
+def download_artifacts(job_id: str) -> Response:
+    job = job_manager.get(job_id)
+    assembly_dir = None
+    payload_assembly = job.payload.get("assembly")
+    if payload_assembly:
+        try:
+            assembly_dir = resolve_assembly(AssemblyRef.model_validate(payload_assembly))
+        except ApiError:
+            logger.warning("artifacts.zip job=%s assembly unavailable; gif skipped", job_id)
+    payload = build_artifact_zip(job.artifact_dir, assembly_dir)
+    return Response(
+        content=payload,
+        media_type="application/zip",
+        headers={"content-disposition": 'attachment; filename="artifact.zip"'},
+    )
 
 
 @router.delete("/{job_id}", response_model=JobResponse, summary="Cancel a queued or running job")

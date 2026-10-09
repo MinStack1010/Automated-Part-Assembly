@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-import shutil
 from pathlib import Path
 from typing import Any, Optional
 
@@ -17,7 +16,7 @@ from api.services.native import require_native
 
 logger = logging.getLogger(__name__)
 
-_PHYSICS_JOINT_PLANNERS = {"bfs", "bk-rrt"}
+_PHYSICS_JOINT_PLANNERS = {"bfs", "bk-rrt", "helical"}
 _GEOMETRIC_JOINT_PLANNERS = {"rrt", "rrt-connect", "birrt", "trrt", "matevec-trrt"}
 _PHYSICS_SEQUENCE_PLANNERS = {"random", "queue", "prog-queue"}
 _GEOMETRIC_SEQUENCE_PLANNERS = {"random", "queue"}
@@ -33,7 +32,9 @@ def _validate_part_selection(metadata_part_ids: list[str], move_id: str, still_i
         raise ApiError(400, "INVALID_INPUT", "still_ids must name other parts in the assembly")
 
 
-def _serialize_path(path: Any, artifact_dir: Optional[Path], n_save_states: int) -> dict[str, Any]:
+def _serialize_path(
+    path: Any, artifact_dir: Optional[Path], n_save_states: int, name: str = "0"
+) -> dict[str, Any]:
     if path is None:
         return {"path": None, "path_state_count": 0}
     state_count = len(path)
@@ -48,71 +49,32 @@ def _serialize_path(path: Any, artifact_dir: Optional[Path], n_save_states: int)
         from assets.save import save_path
 
         path_dir = artifact_dir / "path"
-        save_path(str(path_dir), path, n_frame=n_save_states)
+        save_path(str(path_dir), path, n_frame=n_save_states, name=name)
         result["artifact_directory"] = "path"
     return result
 
 
-def _consolidate_motion_artifacts(output_dir: Path) -> dict[str, Any]:
-    """Merge the per-attempt motion folders written by the sequence planners into ``path/``.
+def _mesh_diagnostics(request: JointPlanRequest, assembly_dir: Path) -> Optional[dict[str, Any]]:
+    """Report the initial-state clearance that decides whether the planner can search deeply."""
+    if not request.mesh_diagnostics:
+        return None
+    try:
+        from api.services.meshes import DEFAULT_COLLISION_THRESHOLD, mesh_gap
 
-    The multi-plan engine saves ``{assembly_id}/{attempt}_{move_id}/{frame}.npy`` for every
-    successful attempt, which mixes the moving part of each step with the attempt numbering.
-    Clients animate a single continuous trajectory, so the frames are renumbered into one
-    ``path/{frame}.npy`` sequence ordered by attempt, and the per-attempt folders are dropped
-    from the artifact listing.
-    """
-    path_dir = output_dir / "path"
-    steps: list[tuple[int, str, Path]] = []
-    if output_dir.is_dir():
-        for step in output_dir.rglob("*"):
-            if not step.is_dir() or step == path_dir or path_dir in step.parents:
-                continue
-            attempt_text, separator, move_id = step.name.partition("_")
-            if not separator or not attempt_text.isdigit() or not move_id:
-                continue
-            if any(frame.is_file() and frame.stem.isdigit() for frame in step.glob("*.npy")):
-                steps.append((int(attempt_text), move_id, step))
-    if not steps:
-        return {}
-    steps.sort(key=lambda step: step[0])
-
-    path_dir.mkdir(parents=True, exist_ok=True)
-    frame_index = 0
-    path_parts: list[dict[str, Any]] = []
-    step_parents: set[Path] = set()
-    for attempt, move_id, step in steps:
-        frames = sorted(
-            (frame for frame in step.glob("*.npy") if frame.stem.isdigit()),
-            key=lambda frame: int(frame.stem),
+        diagnostics = mesh_gap(assembly_dir, move_id=request.move_id, still_ids=request.still_ids)
+    except Exception:
+        logger.warning("mesh diagnostics failed for %s", assembly_dir.name, exc_info=True)
+        return {"available": False}
+    threshold_name = "collision_threshold" if request.engine == "physics" else "max_collision"
+    threshold = request.collision_threshold if request.engine == "physics" else request.max_collision
+    diagnostics[threshold_name] = threshold
+    suggested = diagnostics.get("suggested_collision_threshold", DEFAULT_COLLISION_THRESHOLD)
+    if diagnostics.get("touching") and threshold < suggested:
+        diagnostics["warning"] = (
+            f"parts touch at the initial state but {threshold_name}={threshold} is below {suggested}; "
+            "raise it or run POST /api/v1/assemblies/preprocess before planning"
         )
-        frame_start = frame_index
-        for frame in frames:
-            shutil.copyfile(frame, path_dir / f"{frame_index}.npy")
-            frame_index += 1
-        path_parts.append(
-            {
-                "part_id": move_id,
-                "attempt": attempt,
-                "frame_start": frame_start,
-                "frame_end": frame_index - 1,
-            }
-        )
-        step_parents.add(step.parent)
-
-    for parent in step_parents:
-        if parent == output_dir:
-            for _, _, step in steps:
-                if step.parent == output_dir:
-                    shutil.rmtree(step, ignore_errors=True)
-        else:
-            shutil.rmtree(parent, ignore_errors=True)
-
-    return {
-        "artifact_directory": "path",
-        "path_state_count": frame_index,
-        "path_parts": path_parts,
-    }
+    return diagnostics
 
 
 def run_joint_plan(request: JointPlanRequest, artifact_dir: Optional[str] = None) -> dict[str, Any]:
@@ -122,6 +84,7 @@ def run_joint_plan(request: JointPlanRequest, artifact_dir: Optional[str] = None
     _validate_part_selection(metadata.part_ids, request.move_id, request.still_ids)
     assembly_dir = resolve_assembly(request.assembly)
     output_dir = Path(artifact_dir) if request.save_artifacts and artifact_dir else None
+    diagnostics = _mesh_diagnostics(request, assembly_dir)
 
     logger.info(
         "NATIVE CALL joint-plan engine=%s planner=%s assembly=%s",
@@ -129,18 +92,33 @@ def run_joint_plan(request: JointPlanRequest, artifact_dir: Optional[str] = None
         request.planner,
         assembly_dir.name,
     )
+    helical_info: Optional[dict[str, Any]] = None
     if request.engine == "physics":
-        if request.planner not in _PHYSICS_JOINT_PLANNERS:
-            raise ApiError(400, "INVALID_INPUT", "physics planner must be bfs or bk-rrt")
-        from examples.run_joint_plan import get_planner
+        if request.planner == "helical":
+            from api.services.helical import build_helical_path
 
-        planner = get_planner(request.planner)(
-            str(settings.assets_dir), str(assembly_dir), request.move_id, request.still_ids,
-            request.rotation, request.body_type, request.sdf_dx, request.collision_threshold,
-            request.force_magnitude, request.frame_skip, False,
-        )
-        status, elapsed_seconds, path = planner.plan(
-            request.max_time, seed=request.seed, return_path=True, render=False, record_path=None
+            status, elapsed_seconds, path, helical_info = build_helical_path(
+                assembly_dir, request.move_id, request.still_ids, max_time=request.max_time
+            )
+        else:
+            if request.planner not in _PHYSICS_JOINT_PLANNERS:
+                raise ApiError(400, "INVALID_INPUT", "physics planner must be bfs or bk-rrt")
+            from examples.run_joint_plan import get_planner
+
+            planner = get_planner(request.planner)(
+                str(settings.assets_dir), str(assembly_dir), request.move_id, request.still_ids,
+                request.rotation, request.body_type, request.sdf_dx, request.collision_threshold,
+                request.force_magnitude, request.frame_skip, False,
+            )
+            status, elapsed_seconds, path = planner.plan(
+                request.max_time, seed=request.seed, return_path=True, render=False, record_path=None
+            )
+            helical_info = None
+    elif request.planner == "helical":
+        from api.services.helical import build_helical_path
+
+        status, elapsed_seconds, path, helical_info = build_helical_path(
+            assembly_dir, request.move_id, request.still_ids, max_time=request.max_time
         )
     else:
         if request.planner not in _GEOMETRIC_JOINT_PLANNERS:
@@ -165,7 +143,11 @@ def run_joint_plan(request: JointPlanRequest, artifact_dir: Optional[str] = None
         "status": status,
         "elapsed_seconds": float(elapsed_seconds),
     }
-    result.update(_serialize_path(path, output_dir, request.n_save_states))
+    if diagnostics is not None:
+        result["mesh_diagnostics"] = diagnostics
+    if helical_info is not None:
+        result["helical"] = helical_info
+    result.update(_serialize_path(path, output_dir, request.n_save_states, name=request.move_id))
     return result
 
 
@@ -187,11 +169,20 @@ def run_multi_plan(request: MultiPlanRequest, artifact_dir: Optional[str] = None
         if request.sequence_planner not in _PHYSICS_SEQUENCE_PLANNERS:
             raise ApiError(400, "INVALID_INPUT", "unsupported physics sequence planner")
         if request.path_planner not in _PHYSICS_JOINT_PLANNERS:
-            raise ApiError(400, "INVALID_INPUT", "physics path planner must be bfs or bk-rrt")
+            raise ApiError(400, "INVALID_INPUT", "physics path planner must be bfs, bk-rrt, or helical")
+        import examples.run_multi_plan as run_multi_plan_module
         from examples.run_multi_plan import get_seq_planner
         from assets.save import clear_saved_sdfs
 
         clear_saved_sdfs(str(assembly_dir))
+        original_get_path_planner = run_multi_plan_module.get_path_planner
+        if request.path_planner == "helical":
+            from api.services.helical import HelicalPlanner
+
+            def _get_path_planner(name, _original=original_get_path_planner):
+                return HelicalPlanner if name == "helical" else _original(name)
+
+            run_multi_plan_module.get_path_planner = _get_path_planner
         try:
             planner = get_seq_planner(request.sequence_planner)(str(settings.assets_dir), str(assembly_dir))
             status, sequence, attempts, elapsed_seconds = planner.plan_sequence(
@@ -201,6 +192,7 @@ def run_multi_plan(request: MultiPlanRequest, artifact_dir: Optional[str] = None
                 output_dir, request.n_save_states, verbose=False,
             )
         finally:
+            run_multi_plan_module.get_path_planner = original_get_path_planner
             clear_saved_sdfs(str(assembly_dir))
     else:
         if request.sequence_planner not in _GEOMETRIC_SEQUENCE_PLANNERS:
@@ -222,17 +214,6 @@ def run_multi_plan(request: MultiPlanRequest, artifact_dir: Optional[str] = None
         finally:
             clear_saved_sdfs(str(assembly_dir))
 
-    motion: dict[str, Any] = {}
-    if output_dir is not None:
-        motion = _consolidate_motion_artifacts(Path(output_dir))
-        if motion:
-            logger.info(
-                "MULTI-PLAN ARTIFACTS dir=%s frames=%s parts=%s",
-                motion["artifact_directory"],
-                motion["path_state_count"],
-                [(part["part_id"], part["frame_start"], part["frame_end"]) for part in motion["path_parts"]],
-            )
-
     return {
         "engine": request.engine,
         "sequence_planner": request.sequence_planner,
@@ -242,5 +223,4 @@ def run_multi_plan(request: MultiPlanRequest, artifact_dir: Optional[str] = None
         "sequence": list(sequence),
         "attempts": int(attempts),
         "elapsed_seconds": float(elapsed_seconds),
-        **motion,
     }

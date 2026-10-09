@@ -13,7 +13,7 @@ from fastapi.responses import JSONResponse
 
 from api.config import settings
 from api.errors import ApiError
-from api.routes import assemblies, health, jobs, operations
+from api.routes import assemblies, health, jobs, meshes, operations
 
 logging.basicConfig(level=settings.log_level, format="%(asctime)s %(levelname)s %(name)s %(message)s")
 logger = logging.getLogger(__name__)
@@ -93,5 +93,6 @@ async def unhandled_error_handler(_: Request, exc: Exception) -> JSONResponse:
 
 app.include_router(health.router)
 app.include_router(assemblies.router)
+app.include_router(meshes.router)
 app.include_router(operations.router)
 app.include_router(jobs.router)

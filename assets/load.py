@@ -117,24 +117,20 @@ def load_assembly(obj_dir, translate=True, rotvec=None, return_names=False):
 
 def load_paths(path_dir):
     '''
-    Load motion of assembly meshes at every time step
+    Load motion of assembly meshes at every time step from path.json files.
+    Returns {relative step directory: [4x4 matrix, ...]}, e.g.
+    {"path": [...]} for joint-plan, {"00013/0_1": [...]} for multi-plan.
     '''
     paths = {}
-    for step in os.listdir(path_dir):
-        obj_id = step.split('_')[1]
-        step_dir = os.path.join(path_dir, step)
-        if os.path.isdir(step_dir):
-            path = []
-            frame_files = []
-            for frame_file in os.listdir(step_dir):
-                if frame_file.endswith('.npy'):
-                    frame_files.append(frame_file)
-            frame_files.sort(key=lambda x: int(x.replace('.npy', '')))
-            for frame_file in frame_files:
-                frame_path = os.path.join(step_dir, frame_file)
-                frame_transform = np.load(frame_path)
-                path.append(frame_transform)
-            paths[obj_id] = path
+    for dirpath, _, file_names in os.walk(path_dir):
+        if 'path.json' not in file_names:
+            continue
+        with open(os.path.join(dirpath, 'path.json'), 'r') as fp:
+            frames = json.load(fp)
+        if not frames:
+            continue
+        step = os.path.relpath(dirpath, path_dir)
+        paths[step] = [np.array(frame['matrix'], dtype=float) for frame in frames]
     return paths
 
 

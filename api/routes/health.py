@@ -14,10 +14,13 @@ router = APIRouter(tags=["service"])
 _CAPABILITIES = [
     Capability(name="assembly.inspect", endpoint="/api/v1/assemblies", execution="synchronous", native_backend_required=False, description="List installed OBJ assemblies and inspect their part IDs."),
     Capability(name="assembly.upload", endpoint="/api/v1/assemblies/upload", execution="synchronous", native_backend_required=False, description="Upload an OBJ assembly for later planning."),
+    Capability(name="assembly.preprocess", endpoint="/api/v1/assemblies/preprocess", execution="synchronous", native_backend_required=False, description="Repair non-watertight parts, normalize, subdivide, and radially shrink parts into a new upload, with a straight-pull feasibility check."),
+    Capability(name="mesh.gap", endpoint="/api/v1/mesh-gap", execution="synchronous", native_backend_required=False, description="Measure initial-state part clearance and suggest a collision threshold."),
     Capability(name="mesh.distance", endpoint="/api/v1/mesh-distance", execution="synchronous", native_backend_required=True, description="Calculate minimum assembly-part distance through BVHMesh or SDFMesh."),
     Capability(name="simulation.demo", endpoint="/api/v1/simulations/demo", execution="synchronous", native_backend_required=True, description="Run an exposed redmax_py built-in simulation."),
     Capability(name="joint.plan", endpoint="/api/v1/jobs/joint-plan", execution="job", native_backend_required=True, description="Run the existing physics or geometric single-part disassembly planner."),
     Capability(name="multi.plan", endpoint="/api/v1/jobs/multi-plan", execution="job", native_backend_required=True, description="Run the existing physics or geometric multi-part sequence planner."),
+    Capability(name="job.artifacts.zip", endpoint="/api/v1/jobs/{job_id}/artifacts.zip", execution="synchronous", native_backend_required=False, description="Download all job artifacts as one zip: artifact/npy (path.json converted), artifact/json, artifact/gif (rendered on first download)."),
 ]
 
 

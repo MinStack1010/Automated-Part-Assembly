@@ -95,7 +95,13 @@ class MeshDistanceRequest(BaseModel):
         description="One 3D translation or 6D translation+rotation-vector state per assembly part.",
         examples=[[[0.0, 0.0, 0.0], [0.0, 0.0, 0.0]]],
     )
-    body_type: Literal["bvh", "sdf"] = "bvh"
+    body_type: Literal["bvh", "sdf"] = Field(
+        default="bvh",
+        description=(
+            "BVH contact is exact but scales poorly on dense meshes; use sdf for assemblies "
+            "with interlocking threads or large part meshes when the planner times out."
+        ),
+    )
     sdf_dx: float = Field(default=0.05, gt=0, description="SDF grid resolution when body_type=sdf.")
 
     @model_validator(mode="after")
@@ -105,6 +111,47 @@ class MeshDistanceRequest(BaseModel):
         if any(len(state) not in (3, 6) for state in self.states):
             raise ValueError("each state must contain either 3 or 6 values")
         return self
+
+
+class MeshGapRequest(BaseModel):
+    assembly: AssemblyRef
+    move_id: Optional[str] = Field(
+        default=None,
+        description="Measure clearance only against this part. Omit to compare every pair (up to 10 parts).",
+        examples=["0"],
+    )
+    still_ids: Optional[list[str]] = Field(
+        default=None,
+        description="Restrict move_id comparisons to these parts; defaults to every other part.",
+        examples=[["1"]],
+    )
+
+
+class PreprocessRequest(BaseModel):
+    assembly: AssemblyRef
+    repair: bool = Field(default=True, description="Run pymeshfix on parts that are not watertight.")
+    normalize: bool = Field(
+        default=True,
+        description="Center and scale the assembly to a 10-unit bounding box, matching assets/process_mesh.py.",
+    )
+    subdivide: bool = Field(default=False, description="Subdivide until every edge is shorter than max_edge.")
+    max_edge: float = Field(default=0.5, gt=0)
+    shrink_parts: Optional[dict[str, float]] = Field(
+        default=None,
+        description=(
+            "Radial shrink factor (0 < scale <= 1) per part, applied about the part's own x/y axis. "
+            "Use it on a male part so mating threads no longer interlock and the planner can pull it straight out."
+        ),
+        examples=[{"screw": 0.87}],
+    )
+    verify_part_id: Optional[str] = Field(
+        default=None,
+        description=(
+            "Run a straight-pull collision sweep for this part after processing. "
+            "Defaults to every part named in shrink_parts."
+        ),
+        examples=["screw"],
+    )
 
 
 class NativeDemoRequest(BaseModel):
@@ -129,17 +176,32 @@ class JointPlanRequest(BaseModel):
     )
     planner: str = Field(
         default="bfs",
-        description="physics: bfs or bk-rrt. geometric: rrt, rrt-connect, birrt, trrt, or matevec-trrt.",
+        description=(
+            "physics: bfs, bk-rrt, or helical (synthesizes a verified screw-out path: "
+            "thread pitch is estimated from the mesh, then rotation and axial travel "
+            "are verified against the real meshes; helical ignores rotation/body_type). "
+            "geometric: rrt, rrt-connect, birrt, trrt, or matevec-trrt."
+        ),
     )
     move_id: str = Field(default="0")
     still_ids: list[str] = Field(default_factory=lambda: ["1"], min_length=1)
     rotation: bool = False
-    body_type: Literal["bvh", "sdf"] = "bvh"
+    body_type: Literal["bvh", "sdf"] = Field(
+        default="bvh",
+        description=(
+            "BVH contact is exact but scales poorly on dense meshes; use sdf for assemblies "
+            "with interlocking threads or large part meshes when the planner times out."
+        ),
+    )
     sdf_dx: float = Field(default=0.05, gt=0)
     max_time: float = Field(default=120, gt=0, le=86400)
     seed: int = 1
-    save_artifacts: bool = Field(default=False, description="Store .npy path transforms as downloadable job artifacts.")
+    save_artifacts: bool = Field(default=False, description="Store path.json frames ({name, 4x4 matrix}) as downloadable job artifacts.")
     n_save_states: int = Field(default=100, ge=1, le=100000)
+    mesh_diagnostics: bool = Field(
+        default=True,
+        description="Measure the initial-state part gap and report a suggested collision threshold in the result.",
+    )
     # Physics planner options
     collision_threshold: float = Field(default=0.01, ge=0)
     force_magnitude: float = Field(default=100, gt=0)
@@ -163,21 +225,25 @@ class MultiPlanRequest(BaseModel):
     )
     path_planner: str = Field(
         default="bfs",
-        description="physics: bfs or bk-rrt. geometric: rrt, rrt-connect, birrt, trrt, or matevec-trrt.",
+        description=(
+            "physics: bfs, bk-rrt, or helical (verified screw-out path per move; parts "
+            "without a detectable thread fall back to bfs). "
+            "geometric: rrt, rrt-connect, birrt, trrt, or matevec-trrt."
+        ),
     )
     rotation: bool = False
-    body_type: Literal["bvh", "sdf"] = "bvh"
+    body_type: Literal["bvh", "sdf"] = Field(
+        default="bvh",
+        description=(
+            "BVH contact is exact but scales poorly on dense meshes; use sdf for assemblies "
+            "with interlocking threads or large part meshes when the planner times out."
+        ),
+    )
     sdf_dx: float = Field(default=0.05, gt=0)
     sequence_max_time: float = Field(default=3600, gt=0, le=86400)
     path_max_time: float = Field(default=120, gt=0, le=86400)
     seed: int = 1
-    save_artifacts: bool = Field(
-        default=False,
-        description=(
-            "Store the moving parts' trajectory as path/<frame>.npy job artifacts; "
-            "each frame is a 4x4 transform of the part moving during that segment."
-        ),
-    )
+    save_artifacts: bool = False
     n_save_states: int = Field(default=100, ge=1, le=100000)
     # Physics planner options
     collision_threshold: float = Field(default=0.01, ge=0)

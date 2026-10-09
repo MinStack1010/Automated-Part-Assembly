@@ -142,18 +142,6 @@ class JobManager:
                 return self._snapshot(job)
             return self._snapshot(job)
 
-    def resolve_artifact(self, job_id: str, relative_path: str) -> Path:
-        with self._lock:
-            job = self.get(job_id)
-            candidate = (job.artifact_dir / relative_path).resolve()
-            try:
-                candidate.relative_to(job.artifact_dir.resolve())
-            except ValueError as exc:
-                raise ApiError(400, "INVALID_INPUT", "artifact path escapes the job directory") from exc
-            if not candidate.is_file():
-                raise ApiError(404, "ARTIFACT_NOT_FOUND", "The requested artifact does not exist")
-            return candidate
-
     def _start_available_jobs(self) -> None:
         while len(self._running) < self._max_workers and self._queued:
             job_id = self._queued.pop(0)

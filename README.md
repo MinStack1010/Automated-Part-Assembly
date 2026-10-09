@@ -13,7 +13,7 @@ HTTP / JSON client
         v
 FastAPI routes (api/)
         |
-        +-- services: upload/asset validation, job isolation, response mapping
+        +-- services: upload/asset validation, mesh repair and clearance diagnostics, job isolation, response mapping
         |
         v
 existing Python planners and asset helpers
@@ -84,7 +84,8 @@ returned `upload_id`.
 
 Planning results are JSON. A successful joint plan includes an ordered list of
 3D or 6D states unless it exceeds `API_MAX_RESULT_STATES`. Set
-`save_artifacts=true` to also download `.npy` transform frames from the job
+`save_artifacts=true` to also download the `path.json` transform frames (an
+array of `{"name": "<obj_id>", "matrix": [[...4x4...]]}` objects) from the job
 artifact endpoint.
 
 ### Real native call example

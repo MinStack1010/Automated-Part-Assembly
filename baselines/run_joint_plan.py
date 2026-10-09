@@ -182,7 +182,7 @@ class PyPlanner:
             self.visualize_state(state, rotvec)
 
     def save_path(self, path, save_dir, n_save_state):
-        save_path(save_dir, path, n_frame=n_save_state)
+        save_path(save_dir, path, n_frame=n_save_state, name=self.move_id)
 
     def seed(self, seed):
         random.seed(seed)

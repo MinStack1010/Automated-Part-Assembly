@@ -320,7 +320,7 @@ class PhysicsPlanner:
             SimRenderer.replay(self.sim, record=True, record_path=record_path)
 
     def save_path(self, path, save_dir, n_save_state):
-        save_path(save_dir, path, n_frame=n_save_state)
+        save_path(save_dir, path, n_frame=n_save_state, name=self.move_id)
 
     def plan(self, max_time, seed=1, return_path=False, render=False, record_path=None):
 
