@@ -10,7 +10,11 @@ import networkx as nx
 
 from assets.load import load_assembly
 from assets.save import clear_saved_sdfs
-from run_joint_plan import PyPlanner
+try:
+    # Supports importing the baseline sequence planner from the API package.
+    from baselines.run_joint_plan import PyPlanner
+except ModuleNotFoundError:
+    from run_joint_plan import PyPlanner
 
 
 class SequencePlanner:

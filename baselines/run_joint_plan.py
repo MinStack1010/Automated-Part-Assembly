@@ -13,10 +13,18 @@ from time import time
 import random
 from scipy.spatial.transform import Rotation
 
-from pyplanners.rrt_connect import rrt_connect, birrt
-from pyplanners.rrt import rrt
-from pyplanners.targetless_rrt import targetless_rrt
-from pyplanners.smoothing import smooth_path
+try:
+    # The API imports this script as baselines.run_joint_plan. The fallback
+    # retains the original direct-script execution behavior.
+    from baselines.pyplanners.rrt_connect import rrt_connect, birrt
+    from baselines.pyplanners.rrt import rrt
+    from baselines.pyplanners.targetless_rrt import targetless_rrt
+    from baselines.pyplanners.smoothing import smooth_path
+except ModuleNotFoundError:
+    from pyplanners.rrt_connect import rrt_connect, birrt
+    from pyplanners.rrt import rrt
+    from pyplanners.targetless_rrt import targetless_rrt
+    from pyplanners.smoothing import smooth_path
 
 from assets.load import load_assembly, load_part_ids
 from assets.save import interpolate_path, save_path
@@ -174,7 +182,7 @@ class PyPlanner:
             self.visualize_state(state, rotvec)
 
     def save_path(self, path, save_dir, n_save_state):
-        save_path(save_dir, self.viz_mesh_move, self.viz_meshes_still, self.move_id, self.still_ids, path, n_frame=n_save_state)
+        save_path(save_dir, path, n_frame=n_save_state, name=self.move_id)
 
     def seed(self, seed):
         random.seed(seed)

@@ -1,0 +1,17 @@
+numpy==1.26.4
+scipy==1.11.4
+matplotlib==3.8.4
+networkx==2.8.8
+trimesh==3.23.5
+pyquaternion==0.9.9
+tqdm==4.66.4
+sortedcontainers==2.4.0
+shapely==2.0.6
+rtree==1.2.0
+pillow==10.4.0
+python-fcl==0.7.0.11
+pymeshfix==0.18.1
+ghalton==0.6.2
+fastapi==0.115.8
+uvicorn[standard]==0.32.1
+python-multipart==0.0.20

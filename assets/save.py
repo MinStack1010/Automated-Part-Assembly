@@ -1,13 +1,12 @@
 '''
 Save transformed assembly meshes
 '''
+import json
 import os
 import sys
 
 project_base_dir = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'))
 sys.path.append(project_base_dir)
-
-import numpy as np
 
 from assets.transform import get_transform_matrix
 
@@ -48,17 +47,21 @@ def interpolate_path(path, n_frame=None):
 #             still_mesh.export(still_obj_path, include_color=False, header=None)
 
 
-def save_path(obj_dir, path, n_frame=None):
+def save_path(obj_dir, path, n_frame=None, name='0'):
     '''
-    Save motion of assembly meshes at every time step
+    Save the motion of one object as a JSON array of frames:
+    [{"name": <obj_id>, "matrix": [[...4x4...]}, ...]
     '''
     if path is None: return
     path = interpolate_path(path, n_frame)
 
-    os.makedirs(obj_dir)
-    for frame, state in enumerate(path):
-        frame_transform = get_transform_matrix(state)
-        np.save(os.path.join(obj_dir, f'{frame}.npy'), frame_transform)
+    os.makedirs(obj_dir, exist_ok=True)
+    frames = [
+        {"name": str(name), "matrix": get_transform_matrix(state).tolist()}
+        for state in path
+    ]
+    with open(os.path.join(obj_dir, 'path.json'), 'w') as fp:
+        json.dump(frames, fp)
 
 
 def clear_saved_sdfs(obj_dir):

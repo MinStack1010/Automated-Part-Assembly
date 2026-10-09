@@ -10,7 +10,12 @@ import networkx as nx
 
 from assets.load import load_assembly
 from assets.save import clear_saved_sdfs
-from run_joint_plan import get_planner as get_path_planner
+try:
+    # Supports importing this module from the HTTP API while retaining
+    # ``python examples/run_multi_plan.py`` compatibility.
+    from examples.run_joint_plan import get_planner as get_path_planner
+except ModuleNotFoundError:
+    from run_joint_plan import get_planner as get_path_planner
 
 
 class SequencePlanner:
