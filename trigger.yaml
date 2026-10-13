@@ -1,0 +1,9 @@
+filename: cloudbuild.yaml
+github:
+  name: Automated-Part-Assembly
+  owner: MinStack1010
+  push:
+    branch: ^main$
+id: 8314b8b8-6a9a-4f6b-90b4-ed8683f5d431
+name: synode-automated-part-assembly
+resourceName: projects/synode-rc/locations/global/triggers/8314b8b8-6a9a-4f6b-90b4-ed8683f5d431

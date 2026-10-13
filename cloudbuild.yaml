@@ -1,0 +1,20 @@
+steps:
+  # Build Docker image với tên lowercase
+  - name: 'gcr.io/cloud-builders/docker'
+    args: ['build', '-t', 'gcr.io/synode-rc/automated-part-assembly:$COMMIT_SHA', '-t', 'gcr.io/synode-rc/automated-part-assembly:latest', '.']
+
+  # Push image to Google Container Registry
+  - name: 'gcr.io/cloud-builders/docker'
+    args: ['push', 'gcr.io/synode-rc/automated-part-assembly:$COMMIT_SHA']
+
+  # Push latest tag
+  - name: 'gcr.io/cloud-builders/docker'
+    args: ['push', 'gcr.io/synode-rc/automated-part-assembly:latest']
+
+# Chỉ định images để Cloud Build tracking
+images:
+  - 'gcr.io/synode-rc/automated-part-assembly:$COMMIT_SHA'
+  - 'gcr.io/synode-rc/automated-part-assembly:latest'
+
+# Timeout 30 phút vì build C++ lâu
+timeout: '1800s'
