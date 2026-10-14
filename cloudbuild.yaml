@@ -11,6 +11,22 @@ steps:
   - name: 'gcr.io/cloud-builders/docker'
     args: ['push', 'gcr.io/synode-rc/automated-part-assembly:latest']
 
+  # Deploy to Cloud Run
+  - name: 'gcr.io/cloud-builders/gcloud'
+    args:
+      - 'run'
+      - 'deploy'
+      - 'automated-part-assembly'
+      - '--image=gcr.io/synode-rc/automated-part-assembly:latest'
+      - '--platform=managed'
+      - '--region=asia-southeast1'
+      - '--allow-unauthenticated'
+      - '--port=8000'
+      - '--memory=2Gi'
+      - '--cpu=2'
+      - '--timeout=600s'
+      - '--max-instances=10'
+
 # Chỉ định images để Cloud Build tracking
 images:
   - 'gcr.io/synode-rc/automated-part-assembly:$COMMIT_SHA'
