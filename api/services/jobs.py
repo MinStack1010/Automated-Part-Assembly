@@ -49,6 +49,49 @@ def _joint_plan_no_path_error(result: dict[str, Any]) -> Optional[dict[str, str]
     return {"code": code, "message": message}
 
 
+def _has_step_artifacts(artifact_dir: str) -> bool:
+    """Whether the worker wrote at least one planner path.json for its steps."""
+    root = Path(artifact_dir)
+    if not root.is_dir():
+        return False
+    return any(path.is_file() for path in root.rglob("path.json"))
+
+
+def _multi_plan_no_path_error(
+    result: dict[str, Any], payload: dict[str, Any], artifact_dir: str
+) -> Optional[dict[str, str]]:
+    """Fail a multi-plan job whose sequence produced nothing to animate.
+
+    A finished worker process is not a successful plan: without step artifacts
+    the job must not report ``completed`` (the frontend would otherwise show a
+    successful run with nothing to play). Partial sequences still fail, but the
+    result (and any step artifacts already on disk) is preserved for diagnosis.
+    """
+    status = str(result.get("status") or "unknown")
+    sequence = result.get("sequence") or []
+    save_artifacts = bool(payload.get("save_artifacts", False))
+    if status == "Success" and (not save_artifacts or _has_step_artifacts(artifact_dir)):
+        return None
+    if status == "Timeout":
+        code = "PLANNER_TIMEOUT"
+        message = (
+            f"Multi-part planning timed out with {len(sequence)} of the sequence steps "
+            "completed; no complete animation is available."
+            if sequence
+            else "Multi-part planning timed out without completing any sequence step; no artifacts were saved."
+        )
+    elif not sequence and not _has_step_artifacts(artifact_dir):
+        code = "PLANNER_NO_PATH"
+        message = f"Multi-part planning returned status '{status}' without any step path; no artifacts were saved."
+    else:
+        code = "PLANNER_NO_PATH"
+        message = (
+            f"Multi-part planning returned status '{status}' with an incomplete sequence "
+            f"({len(sequence)} steps); no complete animation is available."
+        )
+    return {"code": code, "message": message}
+
+
 def _execute_job_process(
     operation: str,
     payload: dict[str, Any],
@@ -70,7 +113,11 @@ def _execute_job_process(
             from api.services.planning import run_multi_plan
 
             result = run_multi_plan(MultiPlanRequest.model_validate(payload), artifact_dir)
-            result_queue.put({"ok": True, "result": result})
+            no_path_error = _multi_plan_no_path_error(result, payload, artifact_dir)
+            if no_path_error is not None:
+                result_queue.put({"ok": False, "error": no_path_error, "result": result})
+            else:
+                result_queue.put({"ok": True, "result": result})
         else:
             raise ApiError(400, "INVALID_OPERATION", f"Unknown job operation: {operation}")
     except ApiError as exc:
@@ -151,6 +198,53 @@ class JobManager:
                 raise ApiError(409, "JOB_NOT_COMPLETED", f"Job is {job.status}; no result is available")
             assert job.result is not None
             return job.result
+
+    def animation(self, job_id: str) -> dict[str, Any]:
+        """Build the frontend-ready animation manifest for a completed job.
+
+        Same gating as :meth:`result` (404 unknown, 409 unless completed, the
+        job's own error code when it failed) so clients can rely on one
+        convention. Only completed jobs have materialized artifacts.
+        """
+        from api.services.artifacts import list_animation_steps
+
+        with self._lock:
+            job = self.get(job_id)
+            if job.status != "completed":
+                if job.status == "failed" and job.error is not None:
+                    raise ApiError(409, job.error.code, job.error.message)
+                raise ApiError(409, "JOB_NOT_COMPLETED", f"Job is {job.status}; no animation is available")
+            steps = list_animation_steps(job.artifact_dir)
+            part_ids: list[str] = []
+            try:
+                from api.schemas import AssemblyRef
+                from api.services.assemblies import get_metadata
+
+                payload_assembly = job.payload.get("assembly")
+                if payload_assembly:
+                    part_ids = get_metadata(AssemblyRef.model_validate(payload_assembly)).part_ids
+            except Exception:
+                logger.warning("JOB ANIMATION manifest job=%s assembly unavailable", job_id, exc_info=True)
+            base = f"/api/v1/jobs/{job_id}"
+            manifest_steps = []
+            for step in steps:
+                manifest_steps.append(
+                    {
+                        **step,
+                        "json_url": f"{base}/artifacts/{step['artifact']}",
+                        "npy_url": f"{base}/artifacts/{step['npy_artifact']}" if step["npy_artifact"] else None,
+                        "gif_url": f"{base}/artifacts/{step['gif_artifact']}" if step["gif_artifact"] else None,
+                    }
+                )
+            return {
+                "job_id": job.job_id,
+                "operation": job.operation,
+                "status": job.status,
+                "part_ids": part_ids,
+                "obj_files": {part_id: f"{base}/assembly/{part_id}.obj" for part_id in part_ids},
+                "steps": manifest_steps,
+                "artifacts_zip_url": f"{base}/artifacts.zip",
+            }
 
     def cancel(self, job_id: str) -> JobSnapshot:
         with self._lock:

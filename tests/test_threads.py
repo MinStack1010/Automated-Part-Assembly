@@ -19,7 +19,13 @@ from api.services.meshes import _straight_pull
 from api.services.planning import run_joint_plan
 from api.services.threads import _load_parts, planning_assembly, process_parts
 
-MY_PARTS = Path(__file__).resolve().parent.parent / "assets" / "my_parts"
+# The original helical-threaded pair used to live in assets/my_parts; since
+# Task 2 simplified that demo assembly, the threaded reference meshes are kept
+# here so thread-removal coverage does not depend on the demo geometry.
+MY_PARTS = Path(__file__).resolve().parent / "fixtures" / "threaded_nut_screw"
+# assets/my_parts now holds user-supplied threaded meshes; the simplified
+# thread-free demo pair is preserved under joint_assembly/screw_nut_demo.
+SIMPLE_PARTS = Path(__file__).resolve().parent.parent / "assets" / "joint_assembly" / "screw_nut_demo"
 PART_NAMES = ("nut.obj", "screw.obj")
 
 
@@ -142,6 +148,33 @@ class ThreadSimplificationTests(unittest.TestCase):
             self.assertFalse(entry["applied"], entry)
             self.assertEqual(entry["reason"], "not_watertight")
             self.assertIs(processed["nut"], parts["nut"])
+
+
+class SimpleDemoPairTests(unittest.TestCase):
+    """The simplified assets/my_parts demo pair needs no thread preprocessing."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.parts = _load_parts(SIMPLE_PARTS)
+        cls.processed, cls.report = process_parts(cls.parts)
+
+    def test_pair_is_watertight_and_thread_free(self) -> None:
+        for part_id, mesh in self.parts.items():
+            with self.subTest(part=part_id):
+                self.assertTrue(mesh.is_watertight)
+        self.assertEqual(self.report["simplified_parts"], [])
+        for entry in self.report["parts"].values():
+            self.assertFalse(entry["detected"], entry)
+
+    def test_pair_has_clearance_and_a_straight_exit(self) -> None:
+        from api.services.meshes import mesh_gap
+
+        gap = mesh_gap(SIMPLE_PARTS, move_id="screw", still_ids=["nut"])
+        self.assertFalse(gap["overlapping"])
+        self.assertGreater(gap["gap"], 0.0)
+        pull = _straight_pull(self.parts, "nut", steps=48)
+        self.assertTrue(pull["available"])
+        self.assertTrue(pull["free"], pull)
 
 
 class ThreadPlanningIntegrationTests(unittest.TestCase):

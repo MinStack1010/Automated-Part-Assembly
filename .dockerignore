@@ -31,6 +31,8 @@ docker-compose.yml
 # External test files và datasets
 simulation/externals/stb/tests
 simulation/externals/pybind11/tests
-assets/joint_assembly
+# NOTE: assets/joint_assembly is intentionally NOT excluded: it holds a small
+# verified sample (screw_nut_demo) so collection=joint_assembly resolves in a
+# fresh image. The 2.4G multi_assembly stays out and is mounted at runtime.
 assets/multi_assembly
 logs

@@ -181,7 +181,12 @@ class JobResultEndpointTests(unittest.TestCase):
         self.assertEqual(response.status_code, 404)
 
     def test_artifacts_zip_still_downloads_a_zip(self) -> None:
-        for job_id in (self.joint_id, self.multi_id):
+        for job_id, expected_npy in (
+            (self.joint_id, "artifact/npy/path.npy"),
+            # multi-plan steps keep their own npy: 0_nut/path.json must not
+            # collapse onto the joint-plan npy/path.npy name.
+            (self.multi_id, "artifact/npy/0_nut_path.npy"),
+        ):
             with self.subTest(job_id=job_id):
                 response = self.client.get(f"/api/v1/jobs/{job_id}/artifacts.zip")
                 self.assertEqual(response.status_code, 200)
@@ -190,7 +195,7 @@ class JobResultEndpointTests(unittest.TestCase):
                 with zipfile.ZipFile(io.BytesIO(response.content)) as archive:
                     names = set(archive.namelist())
                 self.assertIn("artifact/json/path.json", names)
-                self.assertIn("artifact/npy/path.npy", names)
+                self.assertIn(expected_npy, names)
 
     def test_result_and_zip_serve_the_same_completed_job(self) -> None:
         json_response = self.client.get(f"/api/v1/jobs/{self.multi_id}/result")

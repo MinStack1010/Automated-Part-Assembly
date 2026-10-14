@@ -9,11 +9,13 @@ blocked forever in ``join()``, leaving the job "running" long after ``max_time``
 from __future__ import annotations
 
 import json
+import tempfile
 import threading
 import unittest
+from pathlib import Path
 
 from api.config import settings
-from api.services.jobs import Job, JobManager, _joint_plan_no_path_error
+from api.services.jobs import Job, JobManager, _joint_plan_no_path_error, _multi_plan_no_path_error
 
 
 def _put_large_result(queue, size: int) -> None:
@@ -195,6 +197,54 @@ class NoPathFailureTest(unittest.TestCase):
         self.assertTrue(finished.wait(timeout=15), "_watch did not finish")
         self.assertEqual(job.status, "completed")
         self.assertTrue((artifact_dir / "npy" / "path.npy").is_file(), "npy motion file missing after completion")
+
+
+class MultiPlanNoPathFailureTest(unittest.TestCase):
+    """A multi-plan run without step artifacts must fail instead of reporting completed."""
+
+    def _empty_dir(self) -> str:
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        return str(Path(tmp.name) / "artifacts")
+
+    def test_timeout_without_steps_is_planner_timeout(self) -> None:
+        error = _multi_plan_no_path_error(
+            {"status": "Timeout", "sequence": []}, {"save_artifacts": True}, self._empty_dir()
+        )
+        self.assertIsNotNone(error)
+        self.assertEqual(error["code"], "PLANNER_TIMEOUT")
+
+    def test_failure_without_steps_is_planner_no_path(self) -> None:
+        error = _multi_plan_no_path_error(
+            {"status": "Failure", "sequence": []}, {"save_artifacts": True}, self._empty_dir()
+        )
+        self.assertEqual(error["code"], "PLANNER_NO_PATH")
+
+    def test_partial_timeout_reports_step_count(self) -> None:
+        error = _multi_plan_no_path_error(
+            {"status": "Timeout", "sequence": ["0"]}, {"save_artifacts": True}, self._empty_dir()
+        )
+        self.assertEqual(error["code"], "PLANNER_TIMEOUT")
+        self.assertIn("1", error["message"])
+
+    def test_success_with_step_artifact_produces_no_error(self) -> None:
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        step_dir = Path(tmp.name) / "artifacts" / "00013" / "0_0"
+        step_dir.mkdir(parents=True)
+        (step_dir / "path.json").write_text("[]")
+        error = _multi_plan_no_path_error(
+            {"status": "Success", "sequence": ["0"]},
+            {"save_artifacts": True},
+            str(Path(tmp.name) / "artifacts"),
+        )
+        self.assertIsNone(error)
+
+    def test_success_without_artifact_request_produces_no_error(self) -> None:
+        error = _multi_plan_no_path_error(
+            {"status": "Success", "sequence": ["0"]}, {"save_artifacts": False}, self._empty_dir()
+        )
+        self.assertIsNone(error)
 
 
 if __name__ == "__main__":

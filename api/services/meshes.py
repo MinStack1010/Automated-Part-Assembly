@@ -46,24 +46,64 @@ def _overlap_pairs(parts: dict[str, trimesh.Trimesh]) -> tuple[set[frozenset[str
     return {frozenset(name) for name in names}, True
 
 
+# Upper bound on proximity query points when python-fcl is unavailable: the
+# rtree-backed trimesh fallback materializes per-point triangle candidates and
+# OOM-kills the worker on dense threaded meshes (100k+ verts / 300k+ faces).
+_MAX_PROXIMITY_POINTS = 20_000
+
+
+def _sampled_vertices(mesh: trimesh.Trimesh) -> np.ndarray:
+    vertices = np.asarray(mesh.vertices, dtype=np.float64)
+    if len(vertices) <= _MAX_PROXIMITY_POINTS:
+        return vertices
+    stride = int(np.ceil(len(vertices) / _MAX_PROXIMITY_POINTS))
+    return np.ascontiguousarray(vertices[::stride])
+
+
+def _fcl_pair_gap(first_mesh: trimesh.Trimesh, second_mesh: trimesh.Trimesh) -> Optional[float]:
+    """BVH-based exact gap via python-fcl; None when fcl is unavailable."""
+    try:
+        from trimesh.collision import CollisionManager
+    except ImportError:
+        return None
+    manager = CollisionManager()
+    manager.add_object("second", second_mesh)
+    return float(manager.min_distance_single(first_mesh))
+
+
+def _proximity_pair_gap(
+    queries: dict[str, Any], parts: dict[str, trimesh.Trimesh], first: str, second: str
+) -> float:
+    first_to_second = float(np.min(queries[first].on_surface(_sampled_vertices(parts[second]))[1]))
+    second_to_first = float(np.min(queries[second].on_surface(_sampled_vertices(parts[first]))[1]))
+    return min(first_to_second, second_to_first)
+
+
 def _gap_report(
     parts: dict[str, trimesh.Trimesh], pairs: list[tuple[str, str]], mode: str
 ) -> dict[str, Any]:
-    from trimesh.proximity import ProximityQuery
+    try:
+        from trimesh.proximity import ProximityQuery
 
-    queries = {part_id: ProximityQuery(mesh) for part_id, mesh in parts.items()}
+        queries: Optional[dict[str, Any]] = {part_id: ProximityQuery(mesh) for part_id, mesh in parts.items()}
+    except ImportError:
+        queries = None
     overlap_pairs, overlap_available = _overlap_pairs(parts)
 
     results = []
     for first, second in pairs:
-        first_to_second = float(np.min(queries[first].on_surface(parts[second].vertices)[1]))
-        second_to_first = float(np.min(queries[second].on_surface(parts[first].vertices)[1]))
+        # Prefer the FCL BVH query: exact and OOM-safe on dense threaded meshes
+        # where the rtree proximity fallback exhausts worker memory (SIGKILL/-9).
+        gap = _fcl_pair_gap(parts[first], parts[second])
+        if gap is None:
+            assert queries is not None
+            gap = _proximity_pair_gap(queries, parts, first, second)
         overlap = frozenset((first, second)) in overlap_pairs
         results.append(
             {
                 "a": first,
                 "b": second,
-                "gap": round(min(first_to_second, second_to_first), 6),
+                "gap": round(gap, 6),
                 "overlap": overlap,
             }
         )

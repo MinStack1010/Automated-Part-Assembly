@@ -122,19 +122,10 @@ def run_joint_plan(request: JointPlanRequest, artifact_dir: Optional[str] = None
                     raise ApiError(400, "INVALID_INPUT", "physics planner must be bfs or bk-rrt")
                 from examples.run_joint_plan import get_planner
 
-                # Physics SDF grids are expensive to build; share them across jobs
-                # through the storage-dir cache. save_sdf makes the model XML
-                # load-or-build-and-save: hits load beside the OBJ, misses persist.
-                sdf_cache_root = None
-                physics_save_sdf = False
-                if body_type == "sdf":
-                    sdf_cache_root = settings.storage_dir / "sdf-cache"
-                    physics_save_sdf = True
                 planner = get_planner(request.planner)(
                     str(settings.assets_dir), str(planning_dir), request.move_id, request.still_ids,
                     request.rotation, body_type, request.sdf_dx, request.collision_threshold,
-                    request.force_magnitude, request.frame_skip, physics_save_sdf,
-                    sdf_cache_root=sdf_cache_root,
+                    request.force_magnitude, request.frame_skip, False,
                 )
                 status, elapsed_seconds, path = planner.plan(
                     request.max_time, seed=request.seed, return_path=True, render=False, record_path=None,

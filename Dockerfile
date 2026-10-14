@@ -89,6 +89,7 @@ FROM ubuntu:22.04 AS runtime
 ENV DEBIAN_FRONTEND=noninteractive
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
+        ca-certificates \
         ffmpeg \
         libegl1 \
         libgl1 \
@@ -104,6 +105,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libxrender1 \
         libxxf86vm1 \
         python3 \
+        python3-distutils \
         python3-tk \
         xauth \
         xvfb \

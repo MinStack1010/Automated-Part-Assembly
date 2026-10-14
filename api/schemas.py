@@ -206,3 +206,37 @@ class JobSnapshot(BaseModel):
 class JobResponse(BaseModel):
     success: Literal[True] = True
     result: JobSnapshot
+
+
+class AnimationStep(BaseModel):
+    """One playable animation: a path.json plus its derived files and URLs."""
+
+    id: str = Field(examples=["path"], description="Step id: 'path' for joint-plan, '<assembly>/<seq>_<move>' for multi-plan.")
+    move_id: str = Field(examples=["0"], description="Moving part id (frames[0].name in path.json).")
+    sequence_index: Optional[int] = Field(default=None, examples=[0], description="Multi-plan sequence order; null for joint-plan.")
+    assembly_id: Optional[str] = Field(default=None, examples=["00013"], description="Multi-plan assembly folder; null for joint-plan.")
+    artifact: str = Field(examples=["path/path.json"], description="Relative path of the source path.json inside the job folder.")
+    frame_count: int = Field(examples=[100], description="Number of {name, 4x4 matrix} frames.")
+    json_url: str = Field(examples=["/api/v1/jobs/<job_id>/artifacts/path/path.json"])
+    npy_artifact: Optional[str] = Field(default=None, examples=["npy/path.npy"])
+    npy_url: Optional[str] = Field(default=None, examples=["/api/v1/jobs/<job_id>/artifacts/npy/path.npy"])
+    gif_artifact: Optional[str] = Field(default=None, examples=["gif/0.gif"])
+    gif_url: Optional[str] = Field(default=None, examples=["/api/v1/jobs/<job_id>/artifacts/gif/0.gif"])
+
+
+class AnimationManifest(BaseModel):
+    job_id: str
+    operation: str
+    status: Literal["completed"]
+    part_ids: list[str] = Field(description="Part ids of the planned assembly; each step move_id is one of these.")
+    obj_files: dict[str, str] = Field(
+        description="Map of part id to its downloadable OBJ URL (same meshes the planner used).",
+        examples=[{"0": "/api/v1/jobs/<job_id>/assembly/0.obj"}],
+    )
+    steps: list[AnimationStep]
+    artifacts_zip_url: str = Field(examples=["/api/v1/jobs/<job_id>/artifacts.zip"])
+
+
+class AnimationResponse(BaseModel):
+    success: Literal[True] = True
+    result: AnimationManifest

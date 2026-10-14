@@ -34,6 +34,9 @@ load.
 | POST | `/api/v1/jobs/multi-plan` | Queue a physics or geometric sequence planner. | JSON `MultiPlanRequest` | job ID |
 | GET | `/api/v1/jobs/{job_id}` | Read job state. | job ID | queued/running/completed/failed/cancelled state |
 | GET | `/api/v1/jobs/{job_id}/result` | Read a completed job's status and artifact list. | job ID | JSON job snapshot (`status`, timestamps, `error`, `artifacts`) |
+| GET | `/api/v1/jobs/{job_id}/animation` | Playable animation manifest for a completed job. | job ID | per-step `frame_count`, `move_id`/`sequence_index`, working `json_url`/`npy_url`/`gif_url`, `obj_files` mesh URLs |
+| GET | `/api/v1/jobs/{job_id}/artifacts/{path}` | Download one artifact file. | job ID + relative artifact path | raw `path.json` / `.npy` / `.gif` bytes |
+| GET | `/api/v1/jobs/{job_id}/assembly/{file}` | Download one source mesh of the job's assembly. | job ID + `<part>.obj` / `translation.json` | raw OBJ/JSON bytes |
 | GET | `/api/v1/jobs/{job_id}/artifacts.zip` | Download every job artifact as one zip. | job ID | `application/zip` (`artifact/npy`, `artifact/json`, `artifact/gif`) |
 | DELETE | `/api/v1/jobs/{job_id}` | Cancel queued/running planner process. | job ID | final job state |
 
@@ -246,9 +249,59 @@ Returns `application/json` — the same snapshot shape as `GET /api/v1/jobs/{job
   (`JOB_NOT_COMPLETED`), failed jobs answer `409` with their own error code
   (e.g. `PLANNER_TIMEOUT`), unknown job IDs answer `404`.
 - `artifacts` lists relative paths inside the job's artifact folder. The `.npy`
-  motion arrays (`npy/path.npy`, shape `(N,4,4)`) are written when the job
-  completes, so the frontend can read them right away; download file contents
-  through `/artifacts.zip`.
+  motion arrays (joint-plan: `npy/path.npy`; multi-plan: one
+  `npy/<assembly>_<seq>_<move>_path.npy` per sequence step, each shape
+  `(N,4,4)`) are written when the job completes, so the frontend can read
+  them right away; download file contents through `/artifacts.zip`, a single
+  `/artifacts/{path}` file, or the `/animation` manifest below.
+
+### Play the completed result as animation
+
+```bash
+curl http://localhost:8000/api/v1/jobs/<job_id>/animation
+```
+
+Returns one step per `path.json` the planners wrote:
+
+```json
+{
+  "success": true,
+  "result": {
+    "job_id": "fdfc04bf-b49a-494e-8207-0b4b55a9279e",
+    "operation": "multi-plan",
+    "status": "completed",
+    "part_ids": ["0", "1", "2"],
+    "obj_files": {"0": "/api/v1/jobs/<job_id>/assembly/0.obj"},
+    "steps": [
+      {
+        "id": "00013/0_0",
+        "move_id": "0",
+        "sequence_index": 0,
+        "assembly_id": "00013",
+        "artifact": "00013/0_0/path.json",
+        "frame_count": 100,
+        "json_url": "/api/v1/jobs/<job_id>/artifacts/00013/0_0/path.json",
+        "npy_artifact": "npy/00013_0_0_path.npy",
+        "npy_url": "/api/v1/jobs/<job_id>/artifacts/npy/00013_0_0_path.npy",
+        "gif_artifact": null,
+        "gif_url": null
+      }
+    ],
+    "artifacts_zip_url": "/api/v1/jobs/<job_id>/artifacts.zip"
+  }
+}
+```
+
+- joint-plan returns a single step (`id: "path"`, `sequence_index: null`);
+  multi-plan returns one step per `<assembly>/<seq>_<move>` in sequence order.
+- Each `path.json` is `[{"name": "<part_id>", "matrix": [[...4x4...]]}, ...]`:
+  the world transform of the moving part per frame (from
+  `assets/save.py:save_path`); still parts stay at their loaded pose. Fetch a
+  step's frames from its `json_url` (or the `(N,4,4)` array from `npy_url`)
+  and the part meshes once from `obj_files`.
+- Same gating as `.../result`: `404` for unknown jobs, `409` while
+  queued/running (`JOB_NOT_COMPLETED`) or with the job's own error code when
+  it failed.
 
 ### Download every artifact as a zip
 

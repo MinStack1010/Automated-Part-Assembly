@@ -17,6 +17,9 @@ _CAPABILITIES = [
     Capability(name="joint.plan", endpoint="/api/v1/jobs/joint-plan", execution="job", native_backend_required=True, description="Run the existing physics or geometric single-part disassembly planner."),
     Capability(name="multi.plan", endpoint="/api/v1/jobs/multi-plan", execution="job", native_backend_required=True, description="Run the existing physics or geometric multi-part sequence planner."),
     Capability(name="job.artifacts.zip", endpoint="/api/v1/jobs/{job_id}/artifacts.zip", execution="synchronous", native_backend_required=False, description="Download all job artifacts as one zip: artifact/npy (path.json converted), artifact/json, artifact/gif (rendered on first download)."),
+    Capability(name="job.animation", endpoint="/api/v1/jobs/{job_id}/animation", execution="synchronous", native_backend_required=False, description="Playable animation manifest for a completed job: per-step frame counts, part ids, OBJ URLs, and working json/npy/gif download URLs."),
+    Capability(name="job.artifact.file", endpoint="/api/v1/jobs/{job_id}/artifacts/{path}", execution="synchronous", native_backend_required=False, description="Download one job artifact file (path.json, .npy motion array, or .gif)."),
+    Capability(name="job.assembly.file", endpoint="/api/v1/jobs/{job_id}/assembly/{filename}", execution="synchronous", native_backend_required=False, description="Download one source mesh (.obj) or translation.json of the job's assembly."),
 ]
 
 

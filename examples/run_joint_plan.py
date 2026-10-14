@@ -8,9 +8,7 @@ sys.path.append(project_base_dir)
 import numpy as np
 import redmax_py as redmax
 import json
-import logging
 import trimesh
-from contextlib import ExitStack
 from time import time
 import networkx as nx
 from scipy.spatial.transform import Rotation
@@ -22,37 +20,7 @@ from assets.save import save_path, clear_saved_sdfs
 from assets.color import get_color
 from assets.transform import transform_pts_by_state, unit_direction
 from assets.mesh_distance import compute_move_mesh_distance
-from assets import sdf_cache
 from utils.renderer import SimRenderer
-
-logger = logging.getLogger(__name__)
-
-# Simulation_Constructor.cpp defaults the XML "res" attribute to 20 when absent.
-SIMULATION_SDF_RES = 20
-
-
-def _sdf_mesh_with_cache(cache_root, assembly_dir, name, mesh, sdf_dx, stats):
-    '''Build one collision-threshold SDFMesh, loading it from cache when valid.'''
-    obj_path = os.path.join(assembly_dir, name)
-    key, obj_sha = sdf_cache.key_for(obj_path, sdf_cache.CONSUMER_THRESHOLD, sdf_dx)
-    with sdf_cache.entry_lock(cache_root, key):
-        cached = sdf_cache.lookup(cache_root, key)
-        if cached is not None:
-            stats['threshold_hit'] += 1
-            t_load = time()
-            phys_mesh = redmax.SDFMesh(mesh.vertices.T, mesh.faces.T, sdf_dx, str(cached), '')
-            logger.info('SDF_CACHE_HIT consumer=threshold part=%s load_seconds=%.3f', name, time() - t_load)
-            return phys_mesh
-        stats['threshold_miss'] += 1
-        staging = sdf_cache.begin_save(cache_root, key)
-        t_build = time()
-        phys_mesh = redmax.SDFMesh(mesh.vertices.T, mesh.faces.T, sdf_dx, '', str(staging))
-        logger.info('SDF_CACHE_MISS consumer=threshold part=%s build_seconds=%.3f', name, time() - t_build)
-        sdf_cache.finish_save(
-            cache_root, key, staging, consumer=sdf_cache.CONSUMER_THRESHOLD,
-            obj_sha256=obj_sha, sdf_dx=sdf_dx,
-        )
-        return phys_mesh
 
 
 class State:
@@ -231,79 +199,33 @@ def allowed_actions(actions, movement_direction):
 
 class PhysicsPlanner:
 
-    def __init__(self, asset_folder, assembly_dir, move_id, still_ids, 
-        rotation=False, body_type='bvh', sdf_dx=0.05, collision_th=0.01, force_mag=1e3, frame_skip=100, save_sdf=False,
-        sdf_cache_root=None):
-
-        cache_root = os.path.abspath(sdf_cache_root) if sdf_cache_root is not None else None
-        cache_stats = {'threshold_hit': 0, 'threshold_miss': 0, 'simulation_hit': 0, 'simulation_miss': 0}
+    def __init__(self, asset_folder, assembly_dir, move_id, still_ids,
+        rotation=False, body_type='bvh', sdf_dx=0.05, collision_th=0.01, force_mag=1e3, frame_skip=100, save_sdf=False):
 
         # calculate collision threshold
         meshes, names = load_assembly(assembly_dir, return_names=True)
         move_mesh = None
         still_meshes = []
-        t_threshold = time()
         for mesh, name in zip(meshes, names):
             obj_id = name.replace('.obj', '')
             if body_type == 'bvh':
                 phys_mesh = redmax.BVHMesh(mesh.vertices.T, mesh.faces.T)
             elif body_type == 'sdf':
-                if cache_root is None:
-                    phys_mesh = redmax.SDFMesh(mesh.vertices.T, mesh.faces.T, sdf_dx)
-                else:
-                    phys_mesh = _sdf_mesh_with_cache(cache_root, assembly_dir, name, mesh, sdf_dx, cache_stats)
+                phys_mesh = redmax.SDFMesh(mesh.vertices.T, mesh.faces.T, sdf_dx)
             else:
                 raise NotImplementedError
             if obj_id == move_id:
                 move_mesh = phys_mesh
             elif obj_id in still_ids:
                 still_meshes.append(phys_mesh)
-        threshold_seconds = time() - t_threshold
-        
+
         min_d = compute_move_mesh_distance(move_mesh, still_meshes, state=np.zeros(3))
         collision_th = max(-min_d, 0) + collision_th
-        
+
         # build simulation
         move_joint_type = 'free3d-exp' if rotation else 'translational'
-        # BodySDFObj recomputes its grid unless a .sdf sits beside the OBJ; with a
-        # cache root, enable load+save so hits load and misses persist for later jobs.
-        xml_save_sdf = save_sdf or (cache_root is not None and body_type == 'sdf')
-        model_string = get_xml_string(assembly_dir, move_id, still_ids, move_joint_type, body_type, sdf_dx, collision_th, xml_save_sdf)
-
-        simulation_entries = []
-        t_simulation = time()
-        with ExitStack() as lock_stack:
-            if cache_root is not None and body_type == 'sdf':
-                for name in sorted(names):
-                    obj_path = os.path.join(assembly_dir, name)
-                    key, obj_sha = sdf_cache.key_for(obj_path, sdf_cache.CONSUMER_SIMULATION, sdf_dx, res=SIMULATION_SDF_RES)
-                    # Sorted key order keeps concurrent jobs from deadlocking on the locks.
-                    lock_stack.enter_context(sdf_cache.entry_lock(cache_root, key))
-                    hit = sdf_cache.install_next_to_obj(cache_root, key, obj_path)
-                    cache_stats['simulation_hit' if hit else 'simulation_miss'] += 1
-                    logger.info('SDF_CACHE_%s consumer=simulation part=%s', 'HIT' if hit else 'MISS', name)
-                    simulation_entries.append((name, key, obj_sha, hit))
-            self.sim = redmax.Simulation(model_string, asset_folder)
-        simulation_seconds = time() - t_simulation
-
-        if cache_root is not None and body_type == 'sdf':
-            # Misses were just computed by BodySDFObj and saved beside their OBJs;
-            # publish them so the next job with this mesh hits the cache.
-            for name, key, obj_sha, was_hit in simulation_entries:
-                if was_hit:
-                    continue
-                sdf_file = os.path.splitext(os.path.join(assembly_dir, name))[0] + '.sdf'
-                if os.path.isfile(sdf_file):
-                    sdf_cache.publish_file(
-                        cache_root, key, sdf_file, consumer=sdf_cache.CONSUMER_SIMULATION,
-                        obj_sha256=obj_sha, sdf_dx=sdf_dx, res=SIMULATION_SDF_RES,
-                    )
-            logger.info(
-                'SDF_PREP threshold_seconds=%.3f simulation_seconds=%.3f cache=%d_hit/%d_miss',
-                threshold_seconds, simulation_seconds,
-                cache_stats['threshold_hit'] + cache_stats['simulation_hit'],
-                cache_stats['threshold_miss'] + cache_stats['simulation_miss'],
-            )
+        model_string = get_xml_string(assembly_dir, move_id, still_ids, move_joint_type, body_type, sdf_dx, collision_th, save_sdf)
+        self.sim = redmax.Simulation(model_string, asset_folder)
         self.rotation = rotation
         self.ndof = 6 if rotation else 3
         self.force_mag = force_mag

@@ -9,7 +9,10 @@ x-common: &common
     MPLBACKEND: Agg
   volumes: &default-volumes
     - .:/app
-    - ${JOINT_ASSEMBLY_DIR:-${HOME}/Downloads/joint_assembly}:/Users/ploggvn/Downloads/joint_assembly
+    # External joint_assembly dataset (optional): shadows the bundled
+    # assets/joint_assembly sample when JOINT_ASSEMBLY_DIR is set, otherwise
+    # mounts the in-repo sample onto itself (no-op).
+    - ${JOINT_ASSEMBLY_DIR:-./assets/joint_assembly}:/app/assets/joint_assembly
 
 services:
   api:
@@ -34,6 +37,11 @@ services:
       MPLBACKEND: Agg
     volumes:
       - api-data:/var/lib/assemble-them-all
+      # Runtime asset mount: .dockerignore keeps the 2.4G multi_assembly (and
+      # any external joint_assembly) out of the image, so the api service
+      # reads them from the host instead of relying on a stale baked copy.
+      - ./assets:/app/assets
+      - ${JOINT_ASSEMBLY_DIR:-./assets/joint_assembly}:/app/assets/joint_assembly
 
   app:
     build:
@@ -62,7 +70,7 @@ services:
       MPLBACKEND: Agg
     volumes:
       - .:/app
-      - ${JOINT_ASSEMBLY_DIR:-${HOME}/Downloads/joint_assembly}:/Users/ploggvn/Downloads/joint_assembly
+      - ${JOINT_ASSEMBLY_DIR:-./assets/joint_assembly}:/app/assets/joint_assembly
       - /tmp/.X11-unix:/tmp/.X11-unix
     command: sleep infinity
 

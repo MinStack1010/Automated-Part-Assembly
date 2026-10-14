@@ -20,7 +20,9 @@ from api.services.threads import planning_assembly
 from baselines.run_joint_plan import PyPlanner
 from examples.run_joint_plan import allowed_actions
 
-MY_PARTS = Path(__file__).resolve().parent.parent / "assets" / "my_parts"
+# assets/my_parts now holds user-supplied threaded meshes; use the preserved
+# simplified pair so these half-space assertions keep their original geometry.
+MY_PARTS = Path(__file__).resolve().parent.parent / "assets" / "joint_assembly" / "screw_nut_demo"
 DOWN = [0.0, 0.0, -1.0]
 
 
