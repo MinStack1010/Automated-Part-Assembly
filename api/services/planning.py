@@ -83,7 +83,14 @@ def run_joint_plan(request: JointPlanRequest, artifact_dir: Optional[str] = None
     t_job = time.perf_counter()
     require_native()
     metadata = get_metadata(request.assembly)
-    _validate_part_selection(metadata.part_ids, request.move_id, request.still_ids)
+    move_id = request.move_id or metadata.part_ids[0]
+    still_ids = (
+        request.still_ids
+        if request.still_ids is not None
+        else [part_id for part_id in metadata.part_ids if part_id != move_id]
+    )
+    request = request.model_copy(update={"move_id": move_id, "still_ids": still_ids})
+    _validate_part_selection(metadata.part_ids, move_id, still_ids)
     assembly_dir = resolve_assembly(request.assembly)
     output_dir = Path(artifact_dir) if request.save_artifacts and artifact_dir else None
     # Default collision representation per engine: physics contact must stay fast

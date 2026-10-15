@@ -150,8 +150,15 @@ class JointPlanRequest(BaseModel):
             "geometric: rrt, rrt-connect, birrt, trrt, or matevec-trrt."
         ),
     )
-    move_id: str = Field(default="0")
-    still_ids: list[str] = Field(default_factory=lambda: ["1"], min_length=1)
+    move_id: Optional[str] = Field(
+        default=None,
+        description="Moving part id. When omitted, the first uploaded part is selected.",
+    )
+    still_ids: Optional[list[str]] = Field(
+        default=None,
+        min_length=1,
+        description="Stationary parts. When omitted, all remaining uploaded parts are selected.",
+    )
     rotation: bool = False
     helical: Optional[HelicalConstraint] = Field(
         default=None,
