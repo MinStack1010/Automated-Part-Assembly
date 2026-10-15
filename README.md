@@ -80,7 +80,10 @@ such as `0.obj` and `1.obj`. `translation.json` is optional and follows the
 existing project format: an object mapping each part ID to its three-value
 translation. Installed assets are referenced by `collection` and
 `assembly_id`; an external 3D project can upload OBJ files first and use the
-returned `upload_id`.
+returned `upload_id`. Alternatively, a single `.obj` containing at least two
+meshes (`o` objects, e.g. screw, nut, washer in `assembly.obj`) can be
+uploaded on its own; the server splits it into per-part files and returns
+their IDs as `part_ids`.
 
 Job results are JSON: `GET /api/v1/jobs/<job_id>/result` returns the job
 snapshot with `status`, timestamps, `error`, and the `artifacts` list (relative

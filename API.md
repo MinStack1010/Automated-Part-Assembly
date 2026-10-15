@@ -52,9 +52,19 @@ Use exactly one installed or uploaded reference:
 {"upload_id": "9be62d7f-c2a6-455a-bf5e-06b315a6d497"}
 ```
 
-`POST /api/v1/assemblies/upload` accepts two or more files with multipart key
-`files`. Only `.obj` and optional `translation.json` are allowed, file names
+`POST /api/v1/assemblies/upload` accepts files with multipart key `files`.
+Only `.obj` and optional `translation.json` are allowed, file names
 cannot contain paths, and the total size is constrained by `API_MAX_UPLOAD_MB`.
+Two shapes are accepted: two or more `.obj` files (one assembly part each),
+or a single `.obj` holding at least two meshes. The single file is split into
+per-part `<part_id>.obj` files along its `o` object boundaries (connected
+meshes are never fragmented); each part keeps its world transform, so the
+input layout is preserved while every part stays independently plannable.
+Part IDs come from the object names (sanitized to filesystem-safe stems,
+deduplicated), and are returned as `part_ids`. If a `translation.json` is
+uploaded with a single file, its keys must cover every extracted part ID.
+A single file with fewer than two usable meshes, or one that cannot be parsed,
+is rejected with `INVALID_ASSEMBLY` / `INVALID_INPUT`.
 
 ## Clearance diagnostics
 
@@ -149,6 +159,38 @@ Notes and limits:
 - With `assets/my_parts` (nut + screw meshed together) the nut becomes
   pullable straight out along `[0, 0, -1]` after removal, while the original
   pair is interlocked in every axis direction.
+
+### Explicit helical constraint
+
+`planner: "helical"` measures the thread pitch from the meshes by default.
+When the estimator cannot see the thread (smooth demo meshes) or aliases the
+pitch, pass an explicit `helical` object instead (joint-plan and multi-plan):
+
+```json
+"helical": {
+  "base_part": "screw",
+  "moving_part": "nut",
+  "axis": [0.0, 0.0, 1.0],
+  "lead": 1.9822,
+  "direction": 1
+}
+```
+
+- `axis` is the screw axis in assembly world coordinates (any orientation;
+  normalized server-side), `lead` is axial travel per full turn in mesh units,
+  `direction` (`1`/`-1`) is the axial sense of disassembly travel.
+- The planner then emits only coupled states satisfying
+  `axial_travel = lead * angle / (2*pi)`; every emitted state is
+  collision-checked against the real meshes, and lateral escapes (e.g. rolling
+  the nut sideways, which the rotation-enabled BFS goal test would otherwise
+  accept) cannot be produced. The rotation sense is resolved by verification
+  and reported as `rotation_sign` in the job's `helical` result block.
+- Rules: requires `planner`/`path_planner: "helical"` (else `400`); for
+  joint-plan `moving_part` must equal `move_id` and `base_part` must be still;
+  for multi-plan the constraint applies only to moves matching its pair and
+  other moves keep auto estimation. In explicit mode there is no silent BFS
+  fallback: an infeasible screw motion returns `Failure` with
+  `reason: "no_collision_free_combo"` and no path.
 
 ## Planner jobs
 

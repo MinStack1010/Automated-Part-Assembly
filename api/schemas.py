@@ -98,6 +98,43 @@ class MeshGapRequest(BaseModel):
     )
 
 
+class HelicalConstraint(BaseModel):
+    """Explicit screw-motion constraint for one threaded pair.
+
+    Unlike planner="helical" auto estimation (which measures pitch from the
+    meshes), this pins the screw axis, thread lead and disassembly direction
+    supplied by the caller. The planner then emits only coupled
+    rotation+translation states satisfying
+    ``axial_travel = lead * angle / (2*pi)`` along ``axis``; lateral escapes
+    such as rolling the nut sideways can never be produced.
+    """
+
+    base_part: str = Field(description="Stationary part carrying the thread axis (e.g. the screw).")
+    moving_part: str = Field(description="Part that unscrews (e.g. the nut).")
+    axis: list[float] = Field(
+        min_length=3,
+        max_length=3,
+        description="Screw axis in assembly world coordinates (need not be Z); normalized server-side.",
+        examples=[[0.0, 0.0, 1.0]],
+    )
+    lead: float = Field(
+        gt=0,
+        description="Axial travel per full turn, in post-preprocess mesh units.",
+        examples=[1.9822],
+    )
+    direction: Literal[1, -1] = Field(
+        description="Axial sense of disassembly travel along axis (+1 with axis, -1 against it). "
+        "The rotation sense is resolved by collision verification and reported in the result.",
+        examples=[1],
+    )
+
+    @model_validator(mode="after")
+    def parts_must_differ(self) -> "HelicalConstraint":
+        if self.base_part == self.moving_part:
+            raise ValueError("base_part and moving_part must name different parts")
+        return self
+
+
 class JointPlanRequest(BaseModel):
     assembly: AssemblyRef
     engine: Literal["physics", "geometric"] = Field(
@@ -116,6 +153,13 @@ class JointPlanRequest(BaseModel):
     move_id: str = Field(default="0")
     still_ids: list[str] = Field(default_factory=lambda: ["1"], min_length=1)
     rotation: bool = False
+    helical: Optional[HelicalConstraint] = Field(
+        default=None,
+        description=(
+            "Optional explicit screw-motion constraint; requires planner='helical'. "
+            "Pins axis/lead/direction instead of estimating them from the meshes."
+        ),
+    )
     body_type: Optional[Literal["bvh", "sdf"]] = Field(
         default=None,
         description=(
@@ -164,6 +208,14 @@ class MultiPlanRequest(BaseModel):
         ),
     )
     rotation: bool = False
+    helical: Optional[HelicalConstraint] = Field(
+        default=None,
+        description=(
+            "Optional explicit screw-motion constraint for one threaded pair; requires "
+            "path_planner='helical'. Applies only to moves matching its moving/base parts; "
+            "other moves use helical auto estimation."
+        ),
+    )
     body_type: Literal["bvh", "sdf"] = Field(
         default="bvh",
         description=(

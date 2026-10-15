@@ -80,11 +80,16 @@ An assembly installed under `assets/{collection}/{assembly_id}` is referenced wi
 
 `POST /api/v1/assemblies/upload` (multipart `files`)
 → `api/routes/assemblies.py:upload_assembly()` (async)
-→ `api/services/assemblies.py:save_upload()`:
-  validates each file name (`_SAFE_SEGMENT`, only `.obj` + `translation.json`, no duplicates,
-  path traversal blocked, size limited by `API_MAX_UPLOAD_MB`)
-  → `mkdir uploads/{uuid4}` → streams each file
-  → `get_metadata()` → `assets/load.py:load_part_ids()` (sorted list of `.obj` stems)
+  → `api/services/assemblies.py:save_upload()`:
+    validates each file name (`_SAFE_SEGMENT`, only `.obj` + `translation.json`, no duplicates,
+    path traversal blocked, size limited by `API_MAX_UPLOAD_MB`)
+    → `mkdir uploads/{uuid4}` → streams each file
+    → when exactly one `.obj` was uploaded, `_split_single_obj()` parses it
+      (trimesh, `group_material=False` so `o` objects stay separate) and writes
+      one `<part_id>.obj` per usable mesh with its world transform applied;
+      the container file is removed so it is never mistaken for an extra part;
+      fewer than two usable meshes (or an unparsable file) is rejected
+    → `get_metadata()` → `assets/load.py:load_part_ids()` (sorted list of `.obj` stems)
   → returns `AssemblyMetadata{source.upload_id, part_ids, part_count, has_translation}`.
 On error → `shutil.rmtree(target_dir)` then `raise ApiError` → the handler returns JSON `{success:false, error:{code,message}}`.
 **Output:** `upload_id` (UUID) pointing at the on-disk directory; used as `assembly.upload_id` for every later call.

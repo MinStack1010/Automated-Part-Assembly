@@ -246,6 +246,74 @@ def rank_estimations(
     )
 
 
+def resolve_helical_spec(
+    spec: dict[str, Any],
+    part_ids: list[str],
+    move_id: Optional[str] = None,
+    still_ids: Optional[list[str]] = None,
+) -> dict[str, Any]:
+    """Validate an explicit screw-motion constraint against an assembly.
+
+    Returns the normalized spec (unit axis list, positive lead, +-1 direction).
+    For single-move planning (joint-plan), ``move_id``/``still_ids`` pin the
+    constraint to that move; otherwise only part existence is checked and the
+    caller decides per-move applicability.
+    """
+    for key in ("base_part", "moving_part", "axis", "lead", "direction"):
+        if key not in spec:
+            raise ApiError(400, "INVALID_INPUT", f"helical constraint is missing '{key}'")
+    base_part = str(spec["base_part"])
+    moving_part = str(spec["moving_part"])
+    if base_part == moving_part:
+        raise ApiError(400, "INVALID_INPUT", "helical base_part and moving_part must differ")
+    known = set(part_ids)
+    if base_part not in known:
+        raise ApiError(400, "INVALID_INPUT", f"helical base_part '{base_part}' is not a part in the assembly")
+    if moving_part not in known:
+        raise ApiError(400, "INVALID_INPUT", f"helical moving_part '{moving_part}' is not a part in the assembly")
+    if move_id is not None and moving_part != move_id:
+        raise ApiError(
+            400, "INVALID_INPUT", f"helical moving_part '{moving_part}' does not match move_id '{move_id}'"
+        )
+    if still_ids is not None and base_part not in still_ids:
+        raise ApiError(
+            400, "INVALID_INPUT", f"helical base_part '{base_part}' is not among the still parts of this move"
+        )
+    try:
+        axis = np.asarray(spec["axis"], dtype=float).reshape(3)
+    except (TypeError, ValueError) as exc:
+        raise ApiError(400, "INVALID_INPUT", "helical axis must be a 3-vector") from exc
+    norm = float(np.linalg.norm(axis))
+    if not np.isfinite(norm) or norm <= 0.0:
+        raise ApiError(400, "INVALID_INPUT", "helical axis must be a non-zero finite vector")
+    try:
+        lead = float(spec["lead"])
+    except (TypeError, ValueError) as exc:
+        raise ApiError(400, "INVALID_INPUT", "helical lead must be a number") from exc
+    if not np.isfinite(lead) or lead <= 0.0:
+        raise ApiError(400, "INVALID_INPUT", "helical lead must be positive")
+    if spec["direction"] not in (1, -1):
+        raise ApiError(400, "INVALID_INPUT", "helical direction must be 1 or -1")
+    return {
+        "base_part": base_part,
+        "moving_part": moving_part,
+        "axis": (axis / norm).tolist(),
+        "lead": lead,
+        "direction": int(spec["direction"]),
+    }
+
+
+def _required_travel(overlap: float, pitch: float, still_extent: float) -> float:
+    """Axial travel that guarantees hull separation when collision-free.
+
+    Past the initial overlap the moving part must additionally clear the
+    still parts' full axial extent; three extra leads alone are not enough
+    when the lead is small relative to the part sizes (the sweep would
+    otherwise exhaust just short of separation on real pairs).
+    """
+    return max(overlap, 0.0) + max(3.0 * pitch, still_extent)
+
+
 def _pitch_variants(
     candidate: dict[str, Any], other_candidates: list[dict[str, Any]]
 ) -> list[tuple[float, str]]:
@@ -332,17 +400,114 @@ def _sweep(
     return "exhausted", None, {"steps": max_steps}
 
 
+def _explicit_sweep_plan(
+    *,
+    move_mesh: trimesh.Trimesh,
+    still_meshes: list[trimesh.Trimesh],
+    spec: dict[str, Any],
+    collider: _PairCollider,
+    hull_move: trimesh.Trimesh,
+    collision_manager: Any,
+    still_bounds: np.ndarray,
+    move_id: str,
+    still_ids: list[str],
+    started_at: float,
+    max_time: Optional[float],
+    info: dict[str, Any],
+) -> tuple[str, Optional[float], Optional[list[np.ndarray]], dict[str, Any]]:
+    """Sweep exactly one caller-specified screw motion, verifying every step.
+
+    Only coupled rotation+translation states satisfying
+    ``axial = lead * angle / (2*pi)`` along ``axis`` are ever generated, so a
+    lateral/crab-like escape cannot be produced here by construction. The
+    rotation sense is resolved by collision verification (both senses tried,
+    first fully verified sweep wins) and reported in ``info``.
+    """
+    axis = np.asarray(spec["axis"], dtype=float)
+    lead = float(spec["lead"])
+    out_sign = int(spec["direction"])
+    center = np.asarray(vertices_center(move_mesh), dtype=float)
+    along_move = move_mesh.vertices @ axis
+    still_vertices = np.vstack([mesh.vertices for mesh in still_meshes])
+    along_still = still_vertices @ axis
+    overlap = min(float(along_move.max()), float(along_still.max())) - max(
+        float(along_move.min()), float(along_still.min())
+    )
+    travel = _required_travel(overlap, lead, float(along_still.max() - along_still.min()))
+    theta_step = _2PI / STEPS_PER_TURN
+    max_steps = int(min(MAX_STEPS, np.ceil((_2PI * travel / lead) / theta_step) + 2))
+    attempts: list[dict[str, Any]] = []
+    for rotation_sign in (1, -1):
+        status, path, detail = _sweep(
+            center=center,
+            axis=axis,
+            pitch=lead,
+            rotation_sign=rotation_sign,
+            out_sign=out_sign,
+            collider=collider,
+            hull_move=hull_move,
+            collision_manager=collision_manager,
+            still_bounds=still_bounds,
+            max_steps=max_steps,
+            started_at=started_at,
+            max_time=max_time,
+        )
+        attempts.append({"rotation_sign": rotation_sign, "out_sign": out_sign, "status": status, **detail})
+        if status == "Success":
+            assert path is not None
+            info.update(
+                mode="explicit",
+                spec={**spec},
+                axis=[round(float(value), 6) for value in axis],
+                axis_point=[round(float(value), 6) for value in center],
+                pitch=round(lead, 6),
+                pitch_source="explicit",
+                rotation_sign=rotation_sign,
+                out_sign=out_sign,
+                turns=round(detail["theta_final"] / _2PI, 3),
+                steps=detail["steps"],
+                attempts=attempts,
+            )
+            logger.info(
+                "explicit helical path move=%s lead=%.4f rotation_sign=%d steps=%d",
+                move_id,
+                lead,
+                rotation_sign,
+                detail["steps"],
+            )
+            return "Success", time.time() - started_at, path, info
+        if status == "Timeout":
+            info.update(mode="explicit", spec={**spec}, attempts=attempts, reason="timeout")
+            return "Timeout", time.time() - started_at, None, info
+    info.update(
+        mode="explicit",
+        spec={**spec},
+        attempts=attempts,
+        reason="no_collision_free_combo",
+        advice=(
+            "the explicit screw motion collides; check axis/lead/direction against "
+            "the real thread (wrong lead or flipped direction jams immediately)"
+        ),
+    )
+    return "Failure", time.time() - started_at, None, info
+
+
 def build_helical_path(
     assembly_dir: Path,
     move_id: str,
     still_ids: list[str],
     max_time: Optional[float] = None,
+    helical: Optional[dict[str, Any]] = None,
 ) -> tuple[str, Optional[float], Optional[list[np.ndarray]], dict[str, Any]]:
     """Synthesize a verified screw-out path; returns (status, elapsed, path, info).
 
     Every returned state is collision-free according to redmax BVH distance
     against the real part meshes, and the path ends as soon as the convex
-    hulls of the moving and still parts separate."""
+    hulls of the moving and still parts separate.
+
+    With ``helical`` (see :func:`resolve_helical_spec`), the screw axis, lead
+    and direction are taken as given instead of estimated; without it the
+    thread pitch is estimated from the meshes as before."""
     started_at = time.time()
     parts = _load_parts(assembly_dir)
     if move_id not in parts:
@@ -355,35 +520,6 @@ def build_helical_path(
 
     info: dict[str, Any] = {"move_id": move_id, "still_ids": list(still_ids)}
     move_mesh = parts[move_id]
-
-    moving_candidates = estimate_thread_candidates(move_mesh)
-    other_candidates = [
-        candidate
-        for part_id, mesh in parts.items()
-        if part_id != move_id
-        for candidate in estimate_thread_candidates(mesh)
-    ]
-    if not moving_candidates:
-        info.update(
-            reason="thread_pitch_not_detected",
-            advice=(
-                "the moving part does not look threaded; use planner=bfs, or if it is "
-                "threaded but the profiles are too noisy, preprocess the assembly first"
-            ),
-        )
-        return "Failure", time.time() - started_at, None, info
-    ranked_candidates = rank_estimations(moving_candidates, other_candidates)
-    info["candidates"] = [
-        {
-            "axis": [round(float(value), 6) for value in candidate["axis"]],
-            "pitch": round(float(candidate["pitch"]), 6),
-            "profile": candidate["profile"],
-            "inliers": candidate["inliers"],
-            "pairs": candidate["pairs"],
-            "confidence": candidate["confidence"],
-        }
-        for candidate in ranked_candidates
-    ]
 
     try:
         from trimesh.collision import CollisionManager
@@ -415,6 +551,54 @@ def build_helical_path(
         info.update(reason="start_with_goal")
         return "Start with goal", time.time() - started_at, None, info
 
+    if helical is not None:
+        spec = resolve_helical_spec(
+            helical, list(parts), move_id=move_id, still_ids=list(still_ids)
+        )
+        return _explicit_sweep_plan(
+            move_mesh=move_mesh,
+            still_meshes=still_meshes,
+            spec=spec,
+            collider=collider,
+            hull_move=hull_move,
+            collision_manager=collision_manager,
+            still_bounds=still_bounds,
+            move_id=move_id,
+            still_ids=list(still_ids),
+            started_at=started_at,
+            max_time=max_time,
+            info=info,
+        )
+
+    moving_candidates = estimate_thread_candidates(move_mesh)
+    other_candidates = [
+        candidate
+        for part_id, mesh in parts.items()
+        if part_id != move_id
+        for candidate in estimate_thread_candidates(mesh)
+    ]
+    if not moving_candidates:
+        info.update(
+            reason="thread_pitch_not_detected",
+            advice=(
+                "the moving part does not look threaded; use planner=bfs, or if it is "
+                "threaded but the profiles are too noisy, preprocess the assembly first"
+            ),
+        )
+        return "Failure", time.time() - started_at, None, info
+    ranked_candidates = rank_estimations(moving_candidates, other_candidates)
+    info["candidates"] = [
+        {
+            "axis": [round(float(value), 6) for value in candidate["axis"]],
+            "pitch": round(float(candidate["pitch"]), 6),
+            "profile": candidate["profile"],
+            "inliers": candidate["inliers"],
+            "pairs": candidate["pairs"],
+            "confidence": candidate["confidence"],
+        }
+        for candidate in ranked_candidates
+    ]
+
     attempts: list[dict[str, Any]] = []
     theta_step = _2PI / STEPS_PER_TURN
     for axis_index, candidate in enumerate(ranked_candidates[:MAX_AXIS_CANDIDATES]):
@@ -426,7 +610,7 @@ def build_helical_path(
             float(along_move.min()), float(along_still.min())
         )
         for pitch, pitch_source in _pitch_variants(candidate, other_candidates):
-            travel = max(overlap, 0.0) + 3.0 * pitch
+            travel = _required_travel(overlap, pitch, float(along_still.max() - along_still.min()))
             max_steps = int(
                 min(MAX_STEPS, np.ceil((_2PI * travel / pitch) / theta_step) + 2)
             )
@@ -518,6 +702,7 @@ class HelicalPlanner:
         force_mag: float = 1e3,
         frame_skip: int = 100,
         save_sdf: bool = False,
+        helical: Optional[dict[str, Any]] = None,
     ):
         self.asset_folder = asset_folder
         self.assembly_dir = Path(assembly_dir)
@@ -530,13 +715,25 @@ class HelicalPlanner:
         self.force_mag = force_mag
         self.frame_skip = frame_skip
         self.save_sdf = save_sdf
+        # Explicit constraint applies only to its configured pair; other moves
+        # keep helical auto estimation so default behavior is unchanged.
+        if helical is not None and (
+            helical.get("moving_part") != move_id or helical.get("base_part") not in still_ids
+        ):
+            helical = None
+        self.helical = helical
         self.info: dict[str, Any] = {}
 
     def plan(self, max_time, seed=1, return_path=False, render=False, record_path=None):
         status, elapsed, path, info = build_helical_path(
-            self.assembly_dir, self.move_id, self.still_ids, max_time=max_time
+            self.assembly_dir, self.move_id, self.still_ids, max_time=max_time,
+            helical=self.helical,
         )
-        if status == "Failure" and info.get("reason") == "thread_pitch_not_detected":
+        if (
+            status == "Failure"
+            and self.helical is None
+            and info.get("reason") == "thread_pitch_not_detected"
+        ):
             from examples.run_joint_plan import get_planner
 
             fallback = get_planner("bfs")(

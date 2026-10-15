@@ -110,12 +110,24 @@ def run_joint_plan(request: JointPlanRequest, artifact_dir: Optional[str] = None
             assembly_dir.name,
         )
         helical_info: Optional[dict[str, Any]] = None
+        helical_spec = request.helical.model_dump(mode="json") if request.helical is not None else None
+        if helical_spec is not None and request.planner != "helical":
+            raise ApiError(
+                400, "INVALID_INPUT", "helical constraint requires planner='helical' (it is ignored by bfs/bk-rrt)"
+            )
         if request.engine == "physics":
             if request.planner == "helical":
-                from api.services.helical import build_helical_path
+                from api.services.helical import build_helical_path, resolve_helical_spec
 
+                if helical_spec is not None:
+                    # Fail fast on a misconfigured constraint before any planning.
+                    resolve_helical_spec(
+                        helical_spec, metadata.part_ids,
+                        move_id=request.move_id, still_ids=request.still_ids,
+                    )
                 status, elapsed_seconds, path, helical_info = build_helical_path(
                     planning_dir, request.move_id, request.still_ids, max_time=request.max_time,
+                    helical=helical_spec,
                 )
             else:
                 if request.planner not in _PHYSICS_JOINT_PLANNERS:
@@ -132,10 +144,16 @@ def run_joint_plan(request: JointPlanRequest, artifact_dir: Optional[str] = None
                 )
                 helical_info = None
         elif request.planner == "helical":
-            from api.services.helical import build_helical_path
+            from api.services.helical import build_helical_path, resolve_helical_spec
 
+            if helical_spec is not None:
+                resolve_helical_spec(
+                    helical_spec, metadata.part_ids,
+                    move_id=request.move_id, still_ids=request.still_ids,
+                )
             status, elapsed_seconds, path, helical_info = build_helical_path(
                 planning_dir, request.move_id, request.still_ids, max_time=request.max_time,
+                helical=helical_spec,
             )
         else:
             if request.planner not in _GEOMETRIC_JOINT_PLANNERS:
@@ -179,6 +197,17 @@ def run_multi_plan(request: MultiPlanRequest, artifact_dir: Optional[str] = None
     metadata = get_metadata(request.assembly)
     assembly_dir = resolve_assembly(request.assembly)
     output_dir = str(Path(artifact_dir)) if request.save_artifacts and artifact_dir else None
+    helical_spec = request.helical.model_dump(mode="json") if request.helical is not None else None
+    if helical_spec is not None:
+        if request.path_planner != "helical":
+            raise ApiError(
+                400, "INVALID_INPUT", "helical constraint requires path_planner='helical' (it is ignored by bfs/bk-rrt)"
+            )
+        from api.services.helical import resolve_helical_spec
+
+        # Fail fast on unknown parts; per-move applicability is decided inside
+        # HelicalPlanner so other moves keep auto estimation.
+        resolve_helical_spec(helical_spec, metadata.part_ids)
     simplify_threads = request.path_planner != "helical"
     skip_reason = "planner_requires_threads" if not simplify_threads else None
 
@@ -209,8 +238,15 @@ def run_multi_plan(request: MultiPlanRequest, artifact_dir: Optional[str] = None
             if request.path_planner == "helical":
                 from api.services.helical import HelicalPlanner
 
-                def _get_path_planner(name, _original=original_get_path_planner):
-                    return HelicalPlanner if name == "helical" else _original(name)
+                def _get_path_planner(name, _original=original_get_path_planner, _helical=helical_spec):
+                    if name != "helical":
+                        return _original(name)
+
+                    def _with_helical(*args, **kwargs):
+                        kwargs.setdefault("helical", _helical)
+                        return HelicalPlanner(*args, **kwargs)
+
+                    return _with_helical
 
                 run_multi_plan_module.get_path_planner = _get_path_planner
             try:
