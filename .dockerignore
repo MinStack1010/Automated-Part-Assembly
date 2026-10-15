@@ -11,7 +11,7 @@
 *.egg-info
 **/*.egg-info
 
-# Build artifacts của host (macOS/Windows) - không được copy vào image
+# Build artifacts from host (macOS/Windows) - do not copy into image
 simulation/build
 simulation/dist
 build
@@ -28,7 +28,7 @@ docker-compose.yml
 .env
 .api-data
 
-# External test files và datasets
+# External test files and datasets
 simulation/externals/stb/tests
 simulation/externals/pybind11/tests
 # NOTE: assets/joint_assembly is intentionally NOT excluded: it holds a small

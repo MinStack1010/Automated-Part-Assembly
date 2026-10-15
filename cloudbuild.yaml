@@ -1,5 +1,5 @@
 steps:
-  # Build Docker image với tên lowercase
+  # Build Docker image with lowercase name
   - name: 'gcr.io/cloud-builders/docker'
     args: ['build', '-t', 'gcr.io/synode-rc/automated-part-assembly:$COMMIT_SHA', '-t', 'gcr.io/synode-rc/automated-part-assembly:latest', '.']
 
@@ -27,10 +27,10 @@ steps:
       - '--timeout=600s'
       - '--max-instances=10'
 
-# Chỉ định images để Cloud Build tracking
+# Specify images for Cloud Build tracking
 images:
   - 'gcr.io/synode-rc/automated-part-assembly:$COMMIT_SHA'
   - 'gcr.io/synode-rc/automated-part-assembly:latest'
 
-# Timeout 30 phút vì build C++ lâu
+# Timeout 30 minutes because C++ build takes long
 timeout: '1800s'
