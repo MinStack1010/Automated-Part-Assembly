@@ -6,6 +6,7 @@ import logging
 import multiprocessing as mp
 import queue as queue_module
 import threading
+import time
 import traceback
 import uuid
 from dataclasses import dataclass, field
@@ -152,6 +153,7 @@ class Job:
     error: Optional[ErrorDetail] = None
     process: Any = field(default=None, repr=False)
     result_queue: Any = field(default=None, repr=False)
+    started_monotonic: Optional[float] = field(default=None, repr=False)
 
 
 class JobManager:
@@ -281,6 +283,7 @@ class JobManager:
             job.process = process
             job.status = "running"
             job.started_at = _utc_now()
+            job.started_monotonic = time.monotonic()
             self._running.add(job_id)
             try:
                 process.start()
@@ -294,26 +297,55 @@ class JobManager:
             logger.info("JOB START id=%s operation=%s pid=%s", job_id, job.operation, process.pid)
             threading.Thread(target=self._watch, args=(job_id,), daemon=True).start()
 
+    def _job_timeout_seconds(self, job: Job) -> float:
+        # Planner limits do not cover imports, mesh preparation, or a native
+        # call that never returns. Give those phases a bounded grace period.
+        key, default = ("sequence_max_time", 3600) if job.operation == "multi-plan" else ("max_time", 120)
+        return min(float(settings.job_timeout_seconds), float(job.payload.get(key, default)) + 120)
+
+    @staticmethod
+    def _stop_process(process: Any) -> None:
+        if process.is_alive():
+            process.terminate()
+            process.join(timeout=5)
+        if process.is_alive():
+            process.kill()
+            process.join(timeout=5)
+
     def _watch(self, job_id: str) -> None:
         job = self.get(job_id)
         assert job.process is not None
         message: Optional[dict[str, Any]] = None
+        timeout_seconds = self._job_timeout_seconds(job)
+        deadline = (job.started_monotonic or time.monotonic()) + timeout_seconds
+        timed_out = False
         # Drain the queue while the worker is alive. Joining first deadlocks
         # whenever the pickled result exceeds the OS pipe buffer (~64 KB): the
         # child's queue feeder blocks on write until we read, while we wait
         # for the child to exit before reading at all.
         try:
             while True:
+                if job.status == "cancelled":
+                    self._stop_process(job.process)
+                    break
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    timed_out = True
+                    self._stop_process(job.process)
+                    break
                 try:
-                    message = job.result_queue.get(timeout=0.5)
+                    message = job.result_queue.get(timeout=min(0.5, remaining))
                     break
                 except queue_module.Empty:
                     if not job.process.is_alive():
                         break
                 except EOFError:
                     break
-            job.process.join()
-            if message is None:
+            job.process.join(timeout=max(0, deadline - time.monotonic()))
+            if job.process.is_alive():
+                timed_out = True
+                self._stop_process(job.process)
+            if message is None and not timed_out and job.status != "cancelled":
                 try:
                     message = job.result_queue.get_nowait()
                 except (queue_module.Empty, EOFError):
@@ -327,6 +359,14 @@ class JobManager:
             self._running.discard(job_id)
             if current.status == "cancelled":
                 logger.info("JOB CANCELLED id=%s process exited", job_id)
+            elif timed_out:
+                current.status = "failed"
+                current.completed_at = _utc_now()
+                current.error = ErrorDetail(
+                    code="JOB_TIMEOUT",
+                    message=f"The worker exceeded its {timeout_seconds:g}s wall-clock limit and was stopped; queued jobs can continue.",
+                )
+                logger.error("JOB TIMEOUT id=%s limit_seconds=%s", job_id, timeout_seconds)
             elif message is not None and message.get("ok"):
                 # Materialize npy motion files before the job is visible as
                 # completed, so /result and the job snapshot both list them.

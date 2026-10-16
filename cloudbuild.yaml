@@ -17,7 +17,7 @@ steps:
       - 'run'
       - 'deploy'
       - 'automated-part-assembly'
-      - '--image=gcr.io/synode-rc/automated-part-assembly:latest'
+      - '--image=gcr.io/synode-rc/automated-part-assembly:$COMMIT_SHA'
       - '--platform=managed'
       - '--region=asia-southeast1'
       - '--allow-unauthenticated'
@@ -25,7 +25,10 @@ steps:
       - '--memory=2Gi'
       - '--cpu=2'
       - '--timeout=600s'
-      - '--max-instances=10'
+      # Jobs and uploads are instance-local until a shared store is introduced.
+      - '--max-instances=1'
+      - '--min-instances=1'
+      - '--no-cpu-throttling'
 
 # Specify images for Cloud Build tracking
 images:

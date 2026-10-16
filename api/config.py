@@ -24,6 +24,7 @@ class Settings:
     log_level: str
     cors_origins: tuple[str, ...]
     max_workers: int
+    job_timeout_seconds: int
     max_upload_mb: int
     max_result_states: int
 
@@ -52,6 +53,7 @@ def get_settings() -> Settings:
         log_level=os.getenv("LOG_LEVEL", "INFO").upper(),
         cors_origins=origins,
         max_workers=_positive_int("API_MAX_WORKERS", 1),
+        job_timeout_seconds=_positive_int("API_JOB_TIMEOUT_SECONDS", 3900),
         max_upload_mb=_positive_int("API_MAX_UPLOAD_MB", 250),
         max_result_states=_positive_int("API_MAX_RESULT_STATES", 10000),
     )

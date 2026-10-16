@@ -11,8 +11,10 @@ from __future__ import annotations
 import json
 import tempfile
 import threading
+import time
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from api.config import settings
 from api.services.jobs import Job, JobManager, _joint_plan_no_path_error, _multi_plan_no_path_error
@@ -20,6 +22,15 @@ from api.services.jobs import Job, JobManager, _joint_plan_no_path_error, _multi
 
 def _put_large_result(queue, size: int) -> None:
     queue.put({"ok": True, "result": {"blob": "x" * size}})
+
+
+def _hang_without_result() -> None:
+    time.sleep(60)
+
+
+def _put_result_then_hang(queue) -> None:
+    queue.put({"ok": True, "result": {"status": "Success"}})
+    time.sleep(60)
 
 
 def _put_success_with_path(queue) -> None:
@@ -45,6 +56,59 @@ def _put_planner_timeout(queue) -> None:
 
 
 class JobWatchTest(unittest.TestCase):
+    def _hanging_job(self, manager, root, target):
+        job = Job(job_id="hung-worker", operation="joint-plan", payload={}, artifact_dir=root / "hung")
+        job.result_queue = manager._context.Queue()
+        args = (job.result_queue,) if target == _put_result_then_hang else ()
+        job.process = manager._context.Process(target=target, args=args, daemon=True)
+        manager._jobs[job.job_id] = job
+        manager._running.add(job.job_id)
+        job.status = "running"
+        job.started_monotonic = time.monotonic()
+        job.process.start()
+        self.addCleanup(JobManager._stop_process, job.process)
+        return job
+
+    def test_timeout_stops_worker_and_starts_next_queued_job(self) -> None:
+        manager = JobManager(max_workers=1)
+        with tempfile.TemporaryDirectory() as tmp:
+            job = self._hanging_job(manager, Path(tmp), _hang_without_result)
+            # Unknown operation fails in the child without requiring native deps.
+            next_job = Job(job_id="next-worker", operation="invalid", payload={}, artifact_dir=Path(tmp) / "next")
+            manager._jobs[next_job.job_id] = next_job
+            manager._queued.append(next_job.job_id)
+            with patch.object(manager, "_job_timeout_seconds", side_effect=lambda item: 0.5 if item is job else 15):
+                manager._watch(job.job_id)
+                self.addCleanup(JobManager._stop_process, next_job.process)
+                deadline = time.monotonic() + 15
+                while next_job.status == "running" and time.monotonic() < deadline:
+                    time.sleep(0.05)
+            self.assertEqual(job.status, "failed")
+            self.assertEqual(job.error.code, "JOB_TIMEOUT")
+            self.assertFalse(job.process.is_alive())
+            self.assertIsNotNone(next_job.started_at)
+            self.assertEqual(next_job.status, "failed")
+            self.assertEqual(next_job.error.code, "INVALID_OPERATION")
+
+    def test_timeout_covers_worker_exit_after_result(self) -> None:
+        manager = JobManager(max_workers=1)
+        with tempfile.TemporaryDirectory() as tmp:
+            job = self._hanging_job(manager, Path(tmp), _put_result_then_hang)
+            with patch.object(manager, "_job_timeout_seconds", return_value=2):
+                manager._watch(job.job_id)
+            self.assertEqual(job.error.code, "JOB_TIMEOUT")
+            self.assertFalse(job.process.is_alive())
+
+    def test_cancelled_worker_releases_slot(self) -> None:
+        manager = JobManager(max_workers=1)
+        with tempfile.TemporaryDirectory() as tmp:
+            job = self._hanging_job(manager, Path(tmp), _hang_without_result)
+            manager.cancel(job.job_id)
+            manager._watch(job.job_id)
+            self.assertEqual(job.status, "cancelled")
+            self.assertNotIn(job.job_id, manager._running)
+            self.assertFalse(job.process.is_alive())
+
     def test_watch_receives_result_larger_than_pipe_buffer(self) -> None:
         manager = JobManager(max_workers=1)
         job_id = "test-large-result"
