@@ -18,9 +18,10 @@ from pyquaternion import Quaternion
 from assets.load import load_translation, load_assembly, load_part_ids
 from assets.save import save_path, clear_saved_sdfs
 from assets.color import get_color
-from assets.transform import transform_pts_by_state, unit_direction
+from assets.transform import transform_pts_by_state, unit_direction, get_transform_matrix
 from assets.mesh_distance import compute_move_mesh_distance
 from utils.renderer import SimRenderer
+from trimesh.collision import CollisionManager
 
 
 class State:
@@ -230,6 +231,7 @@ class PhysicsPlanner:
         self.ndof = 6 if rotation else 3
         self.force_mag = force_mag
         self.frame_skip = frame_skip
+        self.collision_th = collision_th
 
         # names
         self.move_id, self.still_ids = move_id, still_ids
@@ -243,6 +245,20 @@ class PhysicsPlanner:
         self.hull_still = trimesh.convex.convex_hull(self.vertices_still)
         self.collision_manager = trimesh.collision.CollisionManager()
         self.collision_manager.add_object('hull_still', self.hull_still)
+
+        # Triangle-level FCL managers over the REAL trimesh geometry. The
+        # convex-hull proxy above fills the holes of threaded parts and the
+        # redmax BVHMesh.min_distance oracle only samples vertices, so both
+        # miss face-face penetration; FCL queries the full BVH.
+        self._move_fcl = CollisionManager()
+        self._still_fcl = CollisionManager()
+        for mesh, name in zip(meshes, names):
+            obj_id = name.replace('.obj', '')
+            if obj_id == move_id:
+                self._move_tm = mesh
+                self._move_fcl.add_object('move', mesh)
+            elif obj_id in still_ids:
+                self._still_fcl.add_object(f'still_{obj_id}', mesh)
 
         self.E0i_move = self.sim.get_body_E0i(self.move_name)
         self.E0is_still = [self.sim.get_body_E0i(still_name) for still_name in self.still_names]
@@ -302,18 +318,55 @@ class PhysicsPlanner:
     def state_distance(self, state0, state1):
         return self.q_distance(state0.q, state1.q)
 
+    def _fcl_collides(self, matrix):
+        """True when the real moving mesh penetrates any still mesh deeper
+        than the collision threshold under the given 4x4 transform.
+
+        FCL reports per-contact penetration depth, so shallow surface contact
+        in the assembled rest state (depth ~ 0) stays allowed while genuine
+        face-face interpenetration is rejected.
+        """
+        self._move_fcl.set_transform('move', matrix)
+        contact, data = self._still_fcl.in_collision_other(self._move_fcl, return_data=True)
+        if contact:
+            deepest = max(c.depth for c in data)
+            return float(deepest) > self.collision_th
+        return False
+
+    def validate_path(self, path):
+        """Verify every state of a returned path with triangle-level FCL.
+
+        The physics engine uses penalty contacts, so a simulated trajectory can
+        contain transient penetrations (and `is_disassembled` only probes the
+        endpoints). Returns the longest collision-free prefix of the path; an
+        empty list means even the start state penetrates.
+        """
+        if not path:
+            return []
+        safe = []
+        for q in path:
+            matrix = get_transform_matrix(np.asarray(q, dtype=float))
+            if self._fcl_collides(matrix):
+                break
+            safe.append(q)
+        return safe
+
     def is_disassembled(self):
         E0i = self.sim.get_body_E0i(self.move_name)
+        # Deep penetration on the real meshes means still locked together.
+        if self._fcl_collides(E0i):
+            return False
+        # The filled convex hull of the still parts flags any remaining
+        # nesting (e.g. a nut still wrapped around a screw) that the open
+        # real-mesh geometry cannot see.
         hull_move = self.hull_move.copy()
         hull_move.apply_transform(E0i)
-        has_collision = self.collision_manager.in_collision_single(hull_move)
-        if not has_collision:
-            min_box_move, max_box_move = hull_move.vertices.min(axis=0), hull_move.vertices.max(axis=0)
-            move_contain_still = (min_box_move <= self.min_box_still).all() and (max_box_move >= self.max_box_still).all()
-            still_contain_move = (self.min_box_still <= min_box_move).all() and (self.max_box_still >= max_box_move).all()
-            return not (move_contain_still or still_contain_move) # check if one hull fully contains another
-        else:
+        if self.collision_manager.in_collision_single(hull_move):
             return False
+        min_box_move, max_box_move = hull_move.vertices.min(axis=0), hull_move.vertices.max(axis=0)
+        move_contain_still = (min_box_move <= self.min_box_still).all() and (max_box_move >= self.max_box_still).all()
+        still_contain_move = (self.min_box_still <= min_box_move).all() and (self.max_box_still >= max_box_move).all()
+        return not (move_contain_still or still_contain_move) # check if one hull fully contains another
 
     def get_path(self, tree, state):
         states = tree.get_root_path(state)
@@ -394,6 +447,16 @@ class PhysicsPlanner:
                 break
 
             step += 1
+
+        # Verify the returned path with triangle-level FCL. Penalty contacts
+        # in the physics engine can leave transient penetrations between the
+        # endpoints; reject the path rather than return a mesh-crossing one.
+        if path is not None:
+            safe_path = self.validate_path(path)
+            if len(safe_path) < len(path):
+                # penetration exists somewhere on the path -> reject entirely
+                status = 'Failure'
+                path = None
 
         if render:
             # tree.draw()
