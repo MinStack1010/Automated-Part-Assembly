@@ -7,7 +7,7 @@ import logging
 import time
 import warnings
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 import numpy as np
 import trimesh
@@ -92,7 +92,7 @@ def _axis_profiles(
 
 def _estimate_for_axis(
     mesh: trimesh.Trimesh, axis: np.ndarray, kind: str
-) -> Optional[dict[str, Any]]:
+) -> dict[str, Any] | None:
     axis = np.asarray(axis, dtype=float)
     axis = axis / np.linalg.norm(axis)
     z_centers, profile, row_filled, extent = _axis_profiles(mesh, axis, kind)
@@ -147,7 +147,7 @@ def _estimate_for_axis(
             if pitch_min <= pitch <= pitch_max:
                 hypotheses.setdefault(round(pitch, 6), (pitch, 0.0))
 
-    best_pitch: Optional[float] = None
+    best_pitch: float | None = None
     best_inliers: list[tuple[float, float, float]] = []
     for pitch in hypotheses:
         inliers = [
@@ -205,7 +205,7 @@ def estimate_thread_candidates(mesh: trimesh.Trimesh) -> list[dict[str, Any]]:
     return results
 
 
-def estimate_thread(mesh: trimesh.Trimesh) -> Optional[dict[str, Any]]:
+def estimate_thread(mesh: trimesh.Trimesh) -> dict[str, Any] | None:
     """Best thread hypothesis for a standalone mesh, or None when unthreaded."""
     candidates = estimate_thread_candidates(mesh)
     return candidates[0] if candidates else None
@@ -249,8 +249,8 @@ def rank_estimations(
 def resolve_helical_spec(
     spec: dict[str, Any],
     part_ids: list[str],
-    move_id: Optional[str] = None,
-    still_ids: Optional[list[str]] = None,
+    move_id: str | None = None,
+    still_ids: list[str] | None = None,
 ) -> dict[str, Any]:
     """Validate an explicit screw-motion constraint against an assembly.
 
@@ -375,8 +375,8 @@ def _sweep(
     still_bounds: np.ndarray,
     max_steps: int,
     started_at: float,
-    max_time: Optional[float],
-) -> tuple[str, Optional[list[np.ndarray]], dict[str, Any]]:
+    max_time: float | None,
+) -> tuple[str, list[np.ndarray] | None, dict[str, Any]]:
     from assets.transform import get_transform_matrix
 
     theta_step = _2PI / STEPS_PER_TURN
@@ -412,9 +412,9 @@ def _explicit_sweep_plan(
     move_id: str,
     still_ids: list[str],
     started_at: float,
-    max_time: Optional[float],
+    max_time: float | None,
     info: dict[str, Any],
-) -> tuple[str, Optional[float], Optional[list[np.ndarray]], dict[str, Any]]:
+) -> tuple[str, float | None, list[np.ndarray] | None, dict[str, Any]]:
     """Sweep exactly one caller-specified screw motion, verifying every step.
 
     Only coupled rotation+translation states satisfying
@@ -496,9 +496,9 @@ def build_helical_path(
     assembly_dir: Path,
     move_id: str,
     still_ids: list[str],
-    max_time: Optional[float] = None,
-    helical: Optional[dict[str, Any]] = None,
-) -> tuple[str, Optional[float], Optional[list[np.ndarray]], dict[str, Any]]:
+    max_time: float | None = None,
+    helical: dict[str, Any] | None = None,
+) -> tuple[str, float | None, list[np.ndarray] | None, dict[str, Any]]:
     """Synthesize a verified screw-out path; returns (status, elapsed, path, info).
 
     Every returned state is collision-free according to redmax BVH distance
@@ -702,7 +702,7 @@ class HelicalPlanner:
         force_mag: float = 1e3,
         frame_skip: int = 100,
         save_sdf: bool = False,
-        helical: Optional[dict[str, Any]] = None,
+        helical: dict[str, Any] | None = None,
     ):
         self.asset_folder = asset_folder
         self.assembly_dir = Path(assembly_dir)
@@ -729,19 +729,45 @@ class HelicalPlanner:
             self.assembly_dir, self.move_id, self.still_ids, max_time=max_time,
             helical=self.helical,
         )
-        if (
-            status == "Failure"
-            and self.helical is None
-            and info.get("reason") == "thread_pitch_not_detected"
-        ):
+        if status == "Success":
+            self.info = info
+            logger.info("helical plan move=%s status=%s info=%s", self.move_id, status, info)
+            return (status, elapsed, path) if return_path else (status, elapsed)
+
+        reason = info.get("reason") if status == "Failure" else ("timeout" if status == "Timeout" else None)
+        fallback_eligible = (
+            self.helical is None
+            and reason in ("thread_pitch_not_detected", "no_collision_free_combo")
+        ) or status == "Timeout"
+        if fallback_eligible:
+            logger.warning(
+                "HELICAL_FALLBACK_TRIGGERED move=%s helical_status=%s reason=%s planner=bfs rotation=%s",
+                self.move_id, status, reason, self.rotation,
+            )
             from examples.run_joint_plan import get_planner
 
+            # Estimate assembly axis to guide the fallback
+            axis_info = None
+            try:
+                from api.services.axis_constrained import estimate_assembly_axis
+
+                axis_est = estimate_assembly_axis(self.assembly_dir, self.move_id, self.still_ids)
+                if axis_est is not None:
+                    axis_info = {
+                        "axis": [round(float(v), 6) for v in axis_est.axis],
+                        "source": axis_est.source,
+                        "confidence": round(axis_est.confidence, 4),
+                    }
+            except Exception:
+                logger.info("AXIS_ESTIMATION_FAILED move=%s", self.move_id, exc_info=True)
+
+            logger.info("AXIAL_FALLBACK_STARTED move=%s axis=%s", self.move_id, axis_info)
             fallback = get_planner("bfs")(
                 self.asset_folder,
                 str(self.assembly_dir),
                 self.move_id,
                 self.still_ids,
-                self.rotation,
+                True,
                 self.body_type,
                 self.sdf_dx,
                 self.collision_th,
@@ -749,10 +775,43 @@ class HelicalPlanner:
                 self.frame_skip,
                 self.save_sdf,
             )
-            status, elapsed, path = fallback.plan(
+            fb_status, fb_elapsed, fb_path = fallback.plan(
                 max_time, seed=seed, return_path=True, render=False, record_path=None
             )
-            info = {**info, "fallback": "bfs"}
+            # Validate the fallback path
+            if fb_status == "Success" and fb_path and axis_info is not None:
+                from api.services.axis_constrained import _load_parts, validate_full_path
+
+                parts = _load_parts(self.assembly_dir)
+                if self.move_id in parts:
+                    from api.services.axis_constrained import AxisEstimate
+
+                    axis_est = AxisEstimate(
+                        axis=axis_info["axis"],
+                        axis_point=[0.0, 0.0, 0.0],
+                        direction=1,
+                        source=axis_info["source"],
+                        confidence=axis_info["confidence"],
+                    )
+                    still_meshes = [parts[sid] for sid in self.still_ids if sid in parts]
+                    validation = validate_full_path(
+                        fb_path, parts[self.move_id], still_meshes, axis=axis_est
+                    )
+                    if not validation.valid:
+                        logger.warning(
+                            "PATH_VALIDATION_FAILED move=%s reason=%s",
+                            self.move_id, validation.rejection_reason,
+                        )
+                        fb_status = "Failure"
+            info = {
+                **info,
+                "fallback": "bfs",
+                "fallback_reason": reason or status,
+                "fallback_rotation": True,
+                "fallback_status": fb_status,
+                "assembly_axis": axis_info,
+            }
+            status, elapsed, path = fb_status, fb_elapsed, fb_path
         self.info = info
         logger.info("helical plan move=%s status=%s info=%s", self.move_id, status, info)
         return (status, elapsed, path) if return_path else (status, elapsed)

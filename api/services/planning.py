@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 import time
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 import numpy as np
 
@@ -34,7 +34,7 @@ def _validate_part_selection(metadata_part_ids: list[str], move_id: str, still_i
 
 
 def _serialize_path(
-    path: Any, artifact_dir: Optional[Path], n_save_states: int, name: str = "0"
+    path: Any, artifact_dir: Path | None, n_save_states: int, name: str = "0"
 ) -> dict[str, Any]:
     if path is None:
         return {"path": None, "path_state_count": 0}
@@ -55,7 +55,7 @@ def _serialize_path(
     return result
 
 
-def _mesh_diagnostics(request: JointPlanRequest, assembly_dir: Path) -> Optional[dict[str, Any]]:
+def _mesh_diagnostics(request: JointPlanRequest, assembly_dir: Path) -> dict[str, Any] | None:
     """Report the initial-state clearance that decides whether the planner can search deeply."""
     if not request.mesh_diagnostics:
         return None
@@ -78,7 +78,7 @@ def _mesh_diagnostics(request: JointPlanRequest, assembly_dir: Path) -> Optional
     return diagnostics
 
 
-def run_joint_plan(request: JointPlanRequest, artifact_dir: Optional[str] = None) -> dict[str, Any]:
+def run_joint_plan(request: JointPlanRequest, artifact_dir: str | None = None) -> dict[str, Any]:
     """Run an original single-part planner; no planning algorithm is duplicated here."""
     t_job = time.perf_counter()
     require_native()
@@ -116,7 +116,7 @@ def run_joint_plan(request: JointPlanRequest, artifact_dir: Optional[str] = None
             request.planner,
             assembly_dir.name,
         )
-        helical_info: Optional[dict[str, Any]] = None
+        helical_info: dict[str, Any] | None = None
         helical_spec = request.helical.model_dump(mode="json") if request.helical is not None else None
         if helical_spec is not None and request.planner != "helical":
             raise ApiError(
@@ -124,7 +124,7 @@ def run_joint_plan(request: JointPlanRequest, artifact_dir: Optional[str] = None
             )
         if request.engine == "physics":
             if request.planner == "helical":
-                from api.services.helical import build_helical_path, resolve_helical_spec
+                from api.services.helical import resolve_helical_spec
 
                 if helical_spec is not None:
                     # Fail fast on a misconfigured constraint before any planning.
@@ -132,10 +132,72 @@ def run_joint_plan(request: JointPlanRequest, artifact_dir: Optional[str] = None
                         helical_spec, metadata.part_ids,
                         move_id=request.move_id, still_ids=request.still_ids,
                     )
-                status, elapsed_seconds, path, helical_info = build_helical_path(
-                    planning_dir, request.move_id, request.still_ids, max_time=request.max_time,
-                    helical=helical_spec,
+                from api.services.fallback import PlanningStrategyRunner
+
+                runner = PlanningStrategyRunner(
+                    assembly_dir=planning_dir,
+                    move_id=move_id,
+                    still_ids=still_ids,
+                    max_time=request.max_time,
+                    seed=request.seed,
+                    rotation=request.rotation,
+                    body_type=body_type,
+                    sdf_dx=request.sdf_dx,
+                    collision_threshold=request.collision_threshold,
+                    force_magnitude=request.force_magnitude,
+                    frame_skip=request.frame_skip,
+                    helical_spec=helical_spec,
                 )
+                fallback_result = runner.run()
+                axis_info = None
+                if runner.axis_estimate is not None:
+                    axis_info = {
+                        "axis": [round(float(v), 6) for v in runner.axis_estimate.axis],
+                        "axis_point": [round(float(v), 6) for v in runner.axis_estimate.axis_point],
+                        "source": runner.axis_estimate.source,
+                        "confidence": round(runner.axis_estimate.confidence, 4),
+                        "direction": runner.axis_estimate.direction,
+                    }
+                if fallback_result is not None:
+                    status = fallback_result.status
+                    elapsed_seconds = fallback_result.elapsed_seconds
+                    path = fallback_result.path
+                    helical_info = {
+                        **(fallback_result.info or {}),
+                        "strategy": fallback_result.strategy,
+                        "planner_used": fallback_result.planner,
+                        "assembly_axis": axis_info,
+                        "strategy_attempts": [
+                            {
+                                "strategy": a.strategy,
+                                "status": a.status,
+                                "planner": a.planner,
+                                "elapsed_seconds": round(a.elapsed_seconds, 4),
+                                "reason": a.reason,
+                                "timed_out": a.timed_out,
+                            }
+                            for a in runner.attempts
+                        ],
+                    }
+                else:
+                    status = "Failure"
+                    path = None
+                    elapsed_seconds = sum(a.elapsed_seconds for a in runner.attempts)
+                    helical_info = {
+                        "reason": "all_strategies_exhausted",
+                        "assembly_axis": axis_info,
+                        "strategy_attempts": [
+                            {
+                                "strategy": a.strategy,
+                                "status": a.status,
+                                "planner": a.planner,
+                                "elapsed_seconds": round(a.elapsed_seconds, 4),
+                                "reason": a.reason,
+                                "timed_out": a.timed_out,
+                            }
+                            for a in runner.attempts
+                        ],
+                    }
             else:
                 if request.planner not in _PHYSICS_JOINT_PLANNERS:
                     raise ApiError(400, "INVALID_INPUT", "physics planner must be bfs or bk-rrt")
@@ -198,7 +260,7 @@ def run_joint_plan(request: JointPlanRequest, artifact_dir: Optional[str] = None
     return result
 
 
-def run_multi_plan(request: MultiPlanRequest, artifact_dir: Optional[str] = None) -> dict[str, Any]:
+def run_multi_plan(request: MultiPlanRequest, artifact_dir: str | None = None) -> dict[str, Any]:
     """Run an original sequence planner for a multi-part assembly."""
     require_native()
     metadata = get_metadata(request.assembly)
@@ -237,8 +299,8 @@ def run_multi_plan(request: MultiPlanRequest, artifact_dir: Optional[str] = None
             if request.path_planner not in _PHYSICS_JOINT_PLANNERS:
                 raise ApiError(400, "INVALID_INPUT", "physics path planner must be bfs, bk-rrt, or helical")
             import examples.run_multi_plan as run_multi_plan_module
-            from examples.run_multi_plan import get_seq_planner
             from assets.save import clear_saved_sdfs
+            from examples.run_multi_plan import get_seq_planner
 
             clear_saved_sdfs(str(planning_dir))
             original_get_path_planner = run_multi_plan_module.get_path_planner
@@ -272,8 +334,8 @@ def run_multi_plan(request: MultiPlanRequest, artifact_dir: Optional[str] = None
                 raise ApiError(400, "INVALID_INPUT", "geometric sequence planner must be random or queue")
             if request.path_planner not in _GEOMETRIC_JOINT_PLANNERS:
                 raise ApiError(400, "INVALID_INPUT", "unsupported geometric path planner")
-            from baselines.run_multi_plan import get_seq_planner
             from assets.save import clear_saved_sdfs
+            from baselines.run_multi_plan import get_seq_planner
 
             clear_saved_sdfs(str(planning_dir))
             try:

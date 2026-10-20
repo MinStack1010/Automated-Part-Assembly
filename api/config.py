@@ -27,6 +27,13 @@ class Settings:
     job_timeout_seconds: int
     max_upload_mb: int
     max_result_states: int
+    helical_budget_fraction: float
+    combined_budget_fraction: float
+    alternative_budget_fraction: float
+    lateral_tolerance_scale: float
+    score_weight_lateral: float
+    score_weight_length: float
+    score_weight_angular: float
 
     @property
     def uploads_dir(self) -> Path:
@@ -56,6 +63,13 @@ def get_settings() -> Settings:
         job_timeout_seconds=_positive_int("API_JOB_TIMEOUT_SECONDS", 3900),
         max_upload_mb=_positive_int("API_MAX_UPLOAD_MB", 250),
         max_result_states=_positive_int("API_MAX_RESULT_STATES", 10000),
+        helical_budget_fraction=float(os.getenv("HELICAL_BUDGET_FRACTION", "0.5")),
+        combined_budget_fraction=float(os.getenv("COMBINED_BUDGET_FRACTION", "0.35")),
+        alternative_budget_fraction=float(os.getenv("ALTERNATIVE_BUDGET_FRACTION", "0.15")),
+        lateral_tolerance_scale=float(os.getenv("LATERAL_TOLERANCE_SCALE", "0.5")),
+        score_weight_lateral=float(os.getenv("SCORE_WEIGHT_LATERAL", "1.0")),
+        score_weight_length=float(os.getenv("SCORE_WEIGHT_LENGTH", "0.01")),
+        score_weight_angular=float(os.getenv("SCORE_WEIGHT_ANGULAR", "0.5")),
     )
     settings.uploads_dir.mkdir(parents=True, exist_ok=True)
     settings.jobs_dir.mkdir(parents=True, exist_ok=True)

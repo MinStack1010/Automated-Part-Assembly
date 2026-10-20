@@ -31,6 +31,7 @@ from assets.save import interpolate_path, save_path
 from assets.color import get_color
 from assets.transform import transform_pts_by_state, get_transform_matrix, unit_direction
 from assets.mesh_distance import compute_move_mesh_distance
+from trimesh.collision import CollisionManager
 
 
 class PyPlanner:
@@ -98,11 +99,46 @@ class PyPlanner:
         self.state_lower_bound = (self.min_box_still - self.max_box_move) - 0.5 * self.size_box_move
         self.state_upper_bound = (self.max_box_still - self.min_box_move) + 0.5 * self.size_box_move
 
-        # compute convex hulls
+        # compute convex hulls (kept only for backward-compatible goal bounds;
+        # collision checks below use triangle-level FCL on the real meshes)
         self.hull_move = trimesh.convex.convex_hull(self.vertices_move)
         self.hull_still = trimesh.convex.convex_hull(self.vertices_still)
-        self.collision_manager = trimesh.collision.CollisionManager()
+
+        # Triangle-level FCL collision managers over the REAL meshes. redmax
+        # BVHMesh.min_distance only returns a signed penetration depth for
+        # query *vertices* (any outside point reads as the +10 sentinel), so
+        # vertex sampling misses face-face interpenetration between parallel
+        # same-size parts. FCL queries the full BVH and catches every contact.
+        self._move_fcl = CollisionManager()
+        self._move_fcl.add_object('move', self.viz_mesh_move)
+        self._still_fcl = CollisionManager()
+        for _i, _mesh in enumerate(self.viz_meshes_still):
+            self._still_fcl.add_object(f'still{_i}', _mesh)
+        # Convex-hull manager (kept for goal nesting tests only): the filled
+        # hull detects parts that are still interlocked inside a socket.
+        self.collision_manager = CollisionManager()
         self.collision_manager.add_object('hull_still', self.hull_still)
+
+        # Largest safe interpolation step: half of the smallest mesh extent so
+        # a discrete edge check cannot leap past a thin obstacle (tunneling).
+        _extents = [float(mesh.extents.min()) for mesh in [self.viz_mesh_move, *self.viz_meshes_still]]
+        self.max_safe_step = 0.5 * min(_extents) if _extents else float('inf')
+
+    def _fcl_collides(self, q):
+        """True when the real moving mesh penetrates any still mesh deeper
+        than the safety margin at state q.
+
+        FCL reports per-contact penetration depth, so shallow surface contact
+        in the assembled rest state (depth ~ 0) stays allowed while genuine
+        face-face interpenetration is rejected.
+        """
+        transform = get_transform_matrix(np.asarray(q, dtype=float))
+        self._move_fcl.set_transform('move', transform)
+        contact, data = self._still_fcl.in_collision_other(self._move_fcl, return_data=True)
+        if contact:
+            deepest = max(c.depth for c in data)
+            return float(deepest) > self.max_collision
+        return float(self._still_fcl.min_distance_other(self._move_fcl)) < self.max_collision
 
     def get_distance_fn(self):
         if self.rotation:
@@ -125,8 +161,7 @@ class PyPlanner:
         def collision_fn(q):
             if direction is not None and float(np.dot(np.asarray(q, dtype=float)[:3], direction)) < 0.0:
                 return True
-            d = compute_move_mesh_distance(self.mesh_move, self.meshes_still, q)
-            return d < -self.max_collision
+            return self._fcl_collides(q)
         return collision_fn
 
     def get_sample_fn(self, collision_fn):
@@ -149,26 +184,40 @@ class PyPlanner:
         return sample_fn
 
     def get_extend_fn(self, distance_fn, step_size):
+        # Clamp the interpolation step to the smallest mesh feature so a
+        # discrete edge check cannot leap past a thin obstacle (tunneling),
+        # and interpolate evenly so the last sample lands exactly on q2
+        # instead of overshooting it.
+        step = min(float(step_size), self.max_safe_step)
+
         def extend_fn(q1, q2):
             q_dist = distance_fn(q1, q2)
-            num_steps = int(np.ceil(q_dist / step_size))
+            if q_dist <= 1e-12:
+                return
+            num_steps = max(1, int(np.ceil(q_dist / step)))
             for i in range(num_steps):
-                yield q1 + (q2 - q1) / q_dist * (i + 1) * step_size
+                yield q1 + (q2 - q1) * ((i + 1) / num_steps)
         return extend_fn
 
     def get_goal_test(self):
         def goal_test(q):
-            transform = get_transform_matrix(q)
+            transform = get_transform_matrix(np.asarray(q, dtype=float))
+            # Disassembled means: no deep penetration (FCL depth), the parts
+            # are no longer interlocked inside each other's convex hulls, and
+            # one bounding box does not fully contain the other.
+            if self._fcl_collides(q):
+                return False
             hull_move = self.hull_move.copy()
             hull_move.apply_transform(transform)
-            has_collision = self.collision_manager.in_collision_single(hull_move)
-            if not has_collision:
-                min_box_move, max_box_move = hull_move.vertices.min(axis=0), hull_move.vertices.max(axis=0)
-                move_contain_still = (min_box_move <= self.min_box_still).all() and (max_box_move >= self.max_box_still).all()
-                still_contain_move = (self.min_box_still <= min_box_move).all() and (self.max_box_still >= max_box_move).all()
-                return not (move_contain_still or still_contain_move) # check if one hull fully contains another
-            else:
+            # The filled convex hull of the still parts flags any remaining
+            # nesting (e.g. a nut still wrapped around a screw) that the open
+            # real-mesh geometry cannot see.
+            if self.collision_manager.in_collision_single(hull_move):
                 return False
+            min_box_move, max_box_move = hull_move.vertices.min(axis=0), hull_move.vertices.max(axis=0)
+            move_contain_still = (min_box_move <= self.min_box_still).all() and (max_box_move >= self.max_box_still).all()
+            still_contain_move = (self.min_box_still <= min_box_move).all() and (self.max_box_still >= max_box_move).all()
+            return not (move_contain_still or still_contain_move) # check if one hull fully contains another
         return goal_test
 
     def visualize_state(self, state, rotvec=[0, 0, 0]):
